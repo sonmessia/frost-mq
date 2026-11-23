@@ -1,0 +1,14 @@
+{
+  "device": {
+    "publish": ["coldchain/+/${username}/telemetry", "coldchain/+/${username}/status"],
+    "subscribe": ["coldchain/+/${username}/cmd"]
+  },
+  "engine": {
+    "publish": ["coldchain/+/+/cmd", "coldchain/alerts/+"],
+    "subscribe": ["coldchain/+/+/telemetry", "coldchain/+/+/status"]
+  },
+  "viewer": {
+    "publish": [],
+    "subscribe": ["coldchain/#"]
+  }
+}

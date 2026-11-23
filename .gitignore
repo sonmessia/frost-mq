@@ -1,0 +1,48 @@
+# Maven and Java build output
+**/target/
+*.class
+*.jar
+*.war
+*.ear
+!.mvn/wrapper/maven-wrapper.jar
+dependency-reduced-pom.xml
+.mvn/timing.properties
+
+# Runtime output, test captures, and JVM diagnostics
+/alerts.csv
+/artifacts/
+*.log
+*.hprof
+
+# Local environment and credential overrides (public demo users.json is tracked)
+.env
+.env.*
+!.env.example
+*.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Python tooling used by the validation scripts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE metadata and editor temporary files
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
