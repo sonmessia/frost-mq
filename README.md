@@ -60,7 +60,7 @@ The engine accepts `--host`, `--port`, `--alerts`, and `--duration-seconds` (zer
 mvn -pl dashboard javafx:run -Djavafx.args="--host=127.0.0.1 --port=1883"
 ```
 
-All applications read `FROSTMQ_PASSWORD`, falling back to the public demo password below. The dashboard uses `viewer` unless `--username=...` is supplied. It can reconnect using its Retry/Reconnect button; the rule engine reconnects automatically with exponential backoff and replays its subscriptions. There is no durable application queue, so messages published while a client is offline are lost.
+All applications read `FROSTMQ_PASSWORD`, falling back to the public demo password below. The dashboard uses `viewer` unless `--username=...` is supplied. It can reconnect using its Retry/Reconnect button. The rule engine and simulated devices reconnect automatically with exponential backoff; they replay subscriptions and republish application state after reconnect. There is no durable application queue, so messages published while a client is offline are lost.
 
 ### TLS
 
@@ -130,7 +130,7 @@ Callbacks run on the client reader virtual thread. Blocking QoS 1 publishes, sub
 - Connections above the connection quota are closed on accept. Subscriptions above the per-session or total filter quota receive SUBACK `0x80`. New retained topics above quota are not stored; replacing or deleting an existing retained topic is still allowed.
 - Overlapping subscriptions are coalesced to one delivery at the highest granted QoS. Live deliveries have RETAIN false; retained subscription replay has RETAIN true. An empty retained payload deletes the stored value.
 
-This is an in-memory subset, not a production broker: no persistent sessions, QoS 2, WebSockets, clustering, or retained-store disk persistence. TLS is available as an optional server-authenticated transport, not as mutual TLS. The subscription index is a read/write-locked topic-filter trie with exact, `+`, and `#` branches. Connections, subscription filters per session, total filters, and retained topics are capped at 1,024, 100, 10,000, and 10,000 by default. Override them with `FROSTMQ_MAX_CONNECTIONS`, `FROSTMQ_MAX_FILTERS_PER_SESSION`, `FROSTMQ_MAX_FILTERS`, and `FROSTMQ_MAX_RETAINED`. The engine's worker queue holds 10,000 events and logs overflow; its CSV output is local to the process and prefixes formula-like topic values per OWASP CSV-injection guidance. The engine reconnects with capped exponential backoff, replays both subscriptions, and retries transient QoS 1 alert publishes; events published while it is offline are not replayed by the broker.
+This is an in-memory subset, not a production broker: no persistent sessions, QoS 2, WebSockets, clustering, or retained-store disk persistence. TLS is available as an optional server-authenticated transport, not as mutual TLS. The subscription index is a read/write-locked topic-filter trie with exact, `+`, and `#` branches. Connections, subscription filters per session, total filters, and retained topics are capped at 1,024, 100, 10,000, and 10,000 by default. Override them with `FROSTMQ_MAX_CONNECTIONS`, `FROSTMQ_MAX_FILTERS_PER_SESSION`, `FROSTMQ_MAX_FILTERS`, and `FROSTMQ_MAX_RETAINED`. The engine's worker queue holds 10,000 events and logs overflow; its CSV output is local to the process and prefixes formula-like topic values per OWASP CSV-injection guidance. The engine reconnects with capped exponential backoff, replays both subscriptions, and retries transient QoS 1 alert publishes. Simulated devices use the same capped backoff, restore actuator subscriptions, preserve their local temperature/cooling state, and republish retained online status and telemetry. Events published while an application is offline are not replayed by the broker.
 
 ## Tests
 
@@ -138,7 +138,7 @@ This is an in-memory subset, not a production broker: no persistent sessions, Qo
 mvn -B verify
 ```
 
-Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, client-ID isolation, protocol edge cases, queue overflow, connection/subscription/retained quotas, TLS round-trips, QoS 1 retries, concurrent publishes, client timeouts, CSV-injection handling, rule-engine broker-restart recovery, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
+Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, client-ID isolation, protocol edge cases, queue overflow, connection/subscription/retained quotas, deterministic broker shutdown/restart, TLS round-trips, QoS 1 retries, concurrent publishes, client timeouts, CSV-injection handling, rule-engine and simulator broker-restart recovery, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
 
 For an independent standard-client check:
 

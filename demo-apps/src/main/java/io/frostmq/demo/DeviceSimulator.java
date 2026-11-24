@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.*;
 public final class DeviceSimulator implements AutoCloseable {
     private static final Gson GSON = new Gson();
     private static final System.Logger LOG = System.getLogger(DeviceSimulator.class.getName());
+    private static final long INITIAL_RECONNECT_DELAY_MS = 250;
+    private static final long MAX_RECONNECT_DELAY_MS = 10_000;
     private static final class Node {
         final String id;
         final boolean actuator;
@@ -20,6 +22,7 @@ public final class DeviceSimulator implements AutoCloseable {
         final AtomicBoolean cooling = new AtomicBoolean();
         final AtomicBoolean fault = new AtomicBoolean();
         final CompletableFuture<Void> ready = new CompletableFuture<>();
+        double temperature = 4.0;
         Node(String id, boolean actuator) { this.id = id; this.actuator = actuator; }
     }
     private final DemoSettings settings;
@@ -62,46 +65,75 @@ public final class DeviceSimulator implements AutoCloseable {
     private void runNode(Node node) {
         String base = "coldchain/" + settings.site() + "/" + node.id;
         var will = new PublishPacket(base + "/status", bytes("offline"), 1, true, false, 0);
+        var options = new ConnectOptions(settings.host(), settings.port(), node.id, node.id,
+                bytes(settings.password()), 30, will, tls);
+        long reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
         try {
-            node.client.connect(new ConnectOptions(settings.host(), settings.port(), node.id, node.id,
-                    bytes(settings.password()), 30, will, tls));
-            if (node.actuator) {
-                int grant = node.client.subscribe("coldchain/+/" + node.id + "/cmd", 1, (topic, payload, qos, retained) -> {
-                    try {
-                        String power = JsonParser.parseString(new String(payload, StandardCharsets.UTF_8))
-                                .getAsJsonObject().get("power").getAsString();
-                        if (power.equals("on") || power.equals("off")) node.cooling.set(power.equals("on"));
-                    } catch (RuntimeException e) { LOG.log(System.Logger.Level.WARNING, "Invalid actuator command ignored"); }
-                });
-                if (grant == 128) throw new MqttException("Actuator subscription denied");
-            }
-            node.client.publish(base + "/status", bytes("online"), 1, true);
-            node.ready.complete(null);
-            double temp = 4.0;
-            var random = ThreadLocalRandom.current();
             while (running.get() && !Thread.currentThread().isInterrupted()) {
-                if (node.fault.getAndSet(false)) temp = 9.5;
-                else if (node.cooling.get()) temp = Math.max(4.0, temp - 1.2);
-                else temp += (4.0 - temp) * 0.08 + random.nextDouble(-0.25, 0.25);
-                var telemetry = new JsonObject();
-                telemetry.addProperty("temp", Math.round(temp * 100.0) / 100.0);
-                telemetry.addProperty("hum", Math.round(random.nextDouble(72, 84) * 100.0) / 100.0);
-                telemetry.addProperty("door", random.nextInt(20) == 0 ? 1 : 0);
-                telemetry.addProperty("ts", System.currentTimeMillis());
-                node.client.publish(base + "/telemetry", bytes(GSON.toJson(telemetry)), 1, true);
-                Thread.sleep(2000);
+                try {
+                    connect(node, base, options);
+                    node.ready.complete(null);
+                    reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+                    while (running.get() && !Thread.currentThread().isInterrupted()) {
+                        publishTelemetry(node, base);
+                        Thread.sleep(2000);
+                    }
+                } catch (MqttException e) {
+                    node.client.disconnect();
+                    if (!running.get()) break;
+                    LOG.log(System.Logger.Level.WARNING,
+                            "Simulated node " + node.id + " disconnected; reconnecting", e);
+                    Thread.sleep(reconnectDelay);
+                    reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
+                }
             }
         } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        catch (Exception e) {
-            node.ready.completeExceptionally(e);
-            if (running.get()) LOG.log(System.Logger.Level.ERROR, "Simulated node disconnected", e);
-        } finally {
+        finally {
+            if (!node.ready.isDone())
+                node.ready.completeExceptionally(new CancellationException("Simulator stopped before node connected"));
             if (!Thread.currentThread().isInterrupted()) {
                 try { node.client.publish(base + "/status", bytes("offline"), 1, true); }
                 catch (MqttException ignored) {}
             }
             node.client.disconnect();
         }
+    }
+
+    private void connect(Node node, String base, ConnectOptions options) throws MqttException {
+        node.client.connect(options);
+        if (node.actuator) {
+            int grant = node.client.subscribe("coldchain/+/" + node.id + "/cmd", 1,
+                    (topic, payload, qos, retained) -> applyCommand(node, payload));
+            if (grant == 128) {
+                node.client.disconnect();
+                throw new MqttException("Actuator subscription denied");
+            }
+        }
+        node.client.publish(base + "/status", bytes("online"), 1, true);
+        LOG.log(System.Logger.Level.INFO, "Simulated node " + node.id + " connected");
+    }
+
+    private static void applyCommand(Node node, byte[] payload) {
+        try {
+            String power = JsonParser.parseString(new String(payload, StandardCharsets.UTF_8))
+                    .getAsJsonObject().get("power").getAsString();
+            if (power.equals("on") || power.equals("off")) node.cooling.set(power.equals("on"));
+        } catch (RuntimeException e) {
+            LOG.log(System.Logger.Level.WARNING, "Invalid actuator command ignored");
+        }
+    }
+
+    private static void publishTelemetry(Node node, String base) throws MqttException {
+        var random = ThreadLocalRandom.current();
+        if (node.fault.getAndSet(false)) node.temperature = 9.5;
+        else if (node.cooling.get()) node.temperature = Math.max(4.0, node.temperature - 1.2);
+        else node.temperature += (4.0 - node.temperature) * 0.08 + random.nextDouble(-0.25, 0.25);
+        var telemetry = new JsonObject();
+        telemetry.addProperty("temp", Math.round(node.temperature * 100.0) / 100.0);
+        telemetry.addProperty("hum", Math.round(random.nextDouble(72, 84) * 100.0) / 100.0);
+        telemetry.addProperty("door", random.nextInt(20) == 0 ? 1 : 0);
+        telemetry.addProperty("ts", System.currentTimeMillis());
+        node.client.publish(base + "/telemetry", bytes(GSON.toJson(telemetry)), 1, true);
     }
 
     @Override public synchronized void close() {

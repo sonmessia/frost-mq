@@ -69,6 +69,48 @@ class ColdChainIntegrationTest {
         }
     }
 
+    @Test @Timeout(30) void simulatorReconnectsAndRestoresTelemetryStatusAndCommands() throws Exception {
+        var auth = new AuthService(Path.of("../users.json"), Path.of("../acl.json"));
+        try (var first = new BrokerServer(0, auth)) {
+            first.start();
+            int port = first.port();
+            try (var simulator = new DeviceSimulator("127.0.0.1", port, "site", 1, "frostmq-demo")) {
+                simulator.start();
+                first.close();
+                try (var second = new BrokerServer(port, auth);
+                     var viewer = new BlockingMqttClient();
+                     var engine = new BlockingMqttClient()) {
+                    second.start();
+                    viewer.connect(new ConnectOptions("127.0.0.1", port, "restart-viewer", "viewer", "frostmq-demo"));
+                    var restored = new LinkedBlockingQueue<String>();
+                    assertEquals(1, viewer.subscribe("coldchain/site/sensor01/#", 1,
+                            (topic, payload, qos, retained) -> restored.add(topic + "="
+                                    + new String(payload, StandardCharsets.UTF_8))));
+                    engine.connect(new ConnectOptions("127.0.0.1", port, "restart-engine", "engine", "frostmq-demo"));
+
+                    boolean online = false, telemetry = false;
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while ((!online || !telemetry) && System.nanoTime() < deadline) {
+                        String message = restored.poll(500, TimeUnit.MILLISECONDS);
+                        if (message == null) continue;
+                        online |= message.equals("coldchain/site/sensor01/status=online");
+                        telemetry |= message.startsWith("coldchain/site/sensor01/telemetry=");
+                    }
+                    assertTrue(online, "online status was not restored after reconnect");
+                    assertTrue(telemetry, "telemetry did not resume after reconnect");
+
+                    deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (!simulator.cooling("sensor01") && System.nanoTime() < deadline) {
+                        engine.publish("coldchain/site/sensor01/cmd",
+                                "{\"power\":\"on\"}".getBytes(StandardCharsets.UTF_8), 1, false);
+                        Thread.sleep(100);
+                    }
+                    assertTrue(simulator.cooling("sensor01"), "actuator subscription was not restored");
+                }
+            }
+        }
+    }
+
     @Test @Timeout(20) void untrustedTopicLevelCannotInjectSpreadsheetFormula() throws Exception {
         try (var broker = new BrokerServer(0, new AuthService(Path.of("../users.json"), Path.of("../acl.json")))) {
             broker.start();
