@@ -4,7 +4,7 @@ import io.frostmq.broker.*;
 import io.frostmq.common.Tls;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
-import javax.net.ssl.SSLContext;
+import javax.net.ssl.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -13,23 +13,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @Timeout(30)
 class TlsIntegrationTest {
+    private record Material(Path keyStore, Path trustStore) {}
     @TempDir Path temporary;
 
     @Test void tlsRoundTripAndPlaintextIsRejected() throws Exception {
-        Path keyStore = temporary.resolve("server.p12");
-        Path certificate = temporary.resolve("server.crt");
-        Path trustStore = temporary.resolve("trust.p12");
-        keytool("-genkeypair", "-alias", "frostmq", "-keyalg", "RSA", "-keysize", "2048",
-                "-validity", "1", "-storetype", "PKCS12", "-keystore", keyStore.toString(),
-                "-storepass", "changeit", "-keypass", "changeit", "-dname", "CN=localhost",
-                "-ext", "SAN=IP:127.0.0.1,dns:localhost", "-noprompt");
-        keytool("-exportcert", "-alias", "frostmq", "-keystore", keyStore.toString(),
-                "-storepass", "changeit", "-file", certificate.toString());
-        keytool("-importcert", "-noprompt", "-alias", "frostmq", "-file", certificate.toString(),
-                "-keystore", trustStore.toString(), "-storetype", "PKCS12", "-storepass", "changeit");
-
-        SSLContext server = Tls.server(keyStore, "changeit".toCharArray());
-        SSLContext client = Tls.client(trustStore, "changeit".toCharArray());
+        Material material = material("server", "CN=localhost", "SAN=IP:127.0.0.1,dns:localhost");
+        SSLContext server = Tls.server(material.keyStore(), "changeit".toCharArray());
+        SSLContext client = Tls.client(material.trustStore(), "changeit".toCharArray());
         try (var broker = new BrokerServer(0,
                 new AuthService(Path.of("../users.json"), Path.of("../acl.json")), server)) {
             broker.start();
@@ -57,6 +47,63 @@ class TlsIntegrationTest {
                 plaintext.disconnect();
             }
         }
+    }
+
+    @Test void untrustedServerCertificateIsRejected() throws Exception {
+        Material server = material("server", "CN=localhost", "SAN=IP:127.0.0.1,dns:localhost");
+        Material unrelated = material("unrelated", "CN=unrelated.invalid", "SAN=dns:unrelated.invalid");
+        try (var broker = tlsBroker(Tls.server(server.keyStore(), "changeit".toCharArray()))) {
+            broker.start();
+            assertHandshakeRejected("127.0.0.1", broker.port(),
+                    Tls.client(unrelated.trustStore(), "changeit".toCharArray()));
+        }
+    }
+
+    @Test void hostnameOutsideCertificateSanIsRejected() throws Exception {
+        Material material = material("wrong-host", "CN=wrong.invalid", "SAN=dns:wrong.invalid");
+        try (var broker = tlsBroker(Tls.server(material.keyStore(), "changeit".toCharArray()))) {
+            broker.start();
+            assertHandshakeRejected("127.0.0.1", broker.port(),
+                    Tls.client(material.trustStore(), "changeit".toCharArray()));
+        }
+    }
+
+    private BrokerServer tlsBroker(SSLContext context) throws Exception {
+        return new BrokerServer(0,
+                new AuthService(Path.of("../users.json"), Path.of("../acl.json")), context);
+    }
+
+    private static void assertHandshakeRejected(String host, int port, SSLContext context) {
+        var client = new BlockingMqttClient();
+        try {
+            MqttException error = assertThrows(MqttException.class, () -> client.connect(new ConnectOptions(
+                    host, port, "rejected-tls", "viewer", "frostmq-demo".getBytes(StandardCharsets.UTF_8),
+                    30, null, context)));
+            assertTrue(hasCause(error, SSLHandshakeException.class), error.toString());
+        } finally {
+            client.disconnect();
+        }
+    }
+
+    private Material material(String name, String distinguishedName, String san) throws Exception {
+        Path keyStore = temporary.resolve(name + "-server.p12");
+        Path certificate = temporary.resolve(name + "-server.crt");
+        Path trustStore = temporary.resolve(name + "-trust.p12");
+        keytool("-genkeypair", "-alias", name, "-keyalg", "RSA", "-keysize", "2048",
+                "-validity", "1", "-storetype", "PKCS12", "-keystore", keyStore.toString(),
+                "-storepass", "changeit", "-keypass", "changeit", "-dname", distinguishedName,
+                "-ext", san, "-noprompt");
+        keytool("-exportcert", "-alias", name, "-keystore", keyStore.toString(),
+                "-storepass", "changeit", "-file", certificate.toString());
+        keytool("-importcert", "-noprompt", "-alias", name, "-file", certificate.toString(),
+                "-keystore", trustStore.toString(), "-storetype", "PKCS12", "-storepass", "changeit");
+        return new Material(keyStore, trustStore);
+    }
+
+    private static boolean hasCause(Throwable error, Class<? extends Throwable> type) {
+        for (Throwable current = error; current != null; current = current.getCause())
+            if (type.isInstance(current)) return true;
+        return false;
     }
 
     private static void keytool(String... arguments) throws Exception {

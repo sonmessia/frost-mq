@@ -138,7 +138,7 @@ This is an in-memory subset, not a production broker: no persistent sessions, Qo
 mvn -B verify
 ```
 
-Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, client-ID isolation, protocol edge cases, queue overflow, connection/subscription/retained quotas, deterministic broker shutdown/restart, TLS round-trips, QoS 1 retries, concurrent publishes, client timeouts, CSV-injection handling, rule-engine, simulator, and dashboard broker-restart recovery, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
+Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, client-ID isolation, protocol edge cases, queue overflow, connection/subscription/retained quotas, deterministic broker shutdown/restart, TLS round-trips plus untrusted-certificate and hostname failures, QoS 1 retries, concurrent publishes, client timeouts, CSV-injection handling, rule-engine, simulator, and dashboard broker-restart recovery, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
 
 For an independent standard-client check:
 

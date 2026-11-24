@@ -53,14 +53,18 @@ public final class Tls {
     public static SSLContext serverFromEnvironment() throws IOException {
         String path = System.getenv(KEYSTORE_ENV);
         if (path == null || path.isBlank()) return null;
-        return server(Path.of(path), requiredPassword(KEYSTORE_PASSWORD_ENV));
+        char[] password = requiredPassword(KEYSTORE_PASSWORD_ENV);
+        try { return server(Path.of(path), password); }
+        finally { Arrays.fill(password, '\0'); }
     }
 
     /** Returns null when TLS is not configured, preserving the plaintext demo default. */
     public static SSLContext clientFromEnvironment() throws IOException {
         String path = System.getenv(TRUSTSTORE_ENV);
         if (path == null || path.isBlank()) return null;
-        return client(Path.of(path), requiredPassword(TRUSTSTORE_PASSWORD_ENV));
+        char[] password = requiredPassword(TRUSTSTORE_PASSWORD_ENV);
+        try { return client(Path.of(path), password); }
+        finally { Arrays.fill(password, '\0'); }
     }
 
     private static KeyStore load(Path path, char[] password) throws IOException {
