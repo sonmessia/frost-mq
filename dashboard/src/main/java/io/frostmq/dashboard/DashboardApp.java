@@ -1,6 +1,7 @@
 package io.frostmq.dashboard;
 
 import io.frostmq.client.*;
+import io.frostmq.common.Tls;
 import javafx.application.*;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.collections.*;
@@ -9,6 +10,7 @@ import javafx.scene.*;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
+import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -246,7 +248,9 @@ public final class DashboardApp extends Application {
         client.connect(new ConnectOptions(args.getOrDefault("host", "127.0.0.1"),
             Integer.parseInt(args.getOrDefault("port", "1883")),
             args.getOrDefault("client-id", "dashboard-" + UUID.randomUUID()),
-            args.getOrDefault("username", "viewer"), System.getenv().getOrDefault("FROSTMQ_PASSWORD", "frostmq-demo")));
+            args.getOrDefault("username", "viewer"),
+            System.getenv().getOrDefault("FROSTMQ_PASSWORD", "frostmq-demo").getBytes(StandardCharsets.UTF_8),
+            30, null, Tls.clientFromEnvironment()));
         if (client.subscribe("coldchain/#", 1,
             (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload))) == 128)
           throw new MqttException("Viewer subscription denied");

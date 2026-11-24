@@ -39,7 +39,7 @@ mvn -pl dashboard javafx:run
 
 The simulator publishes every two seconds. `sensor01` and `sensor02` each include a cooling actuator listening to their own command topic. The fault raises `sensor01` to 9.5 °C. The engine emits a `CRITICAL` alert above 8 °C, turns cooling on, and emits `RESOLVED` with cooling off below 6 °C. The dashboard has device-fleet and alert-stream screens. Alerts also append to `alerts.csv`.
 
-Ctrl+C stops an application. On normal simulator shutdown, nodes explicitly publish retained `offline` status and disconnect. On an unexpected socket loss or missed keep-alive, the broker publishes their Last Will. Duplicate client IDs disconnect the old session without its Will, as required by the blueprint.
+Ctrl+C stops an application. On normal simulator shutdown, nodes explicitly publish retained `offline` status and disconnect. On an unexpected socket loss or missed keep-alive, the broker publishes their Last Will. Reconnecting with the same account's client ID disconnects the old session without its Will. A client ID owned by another account is rejected with CONNACK code 2, so a viewer cannot take over a sensor session. Account usernames stay reserved as client IDs even while that account is offline.
 
 ### Options
 
@@ -50,7 +50,7 @@ java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.ja
   1883 users.json acl.json 127.0.0.1
 ```
 
-The default bind address is loopback. Port `0` selects an ephemeral port for testing. TLS is optional in the blueprint and is not implemented here; do not expose this plaintext development broker to an untrusted network.
+The default bind address is loopback. Port `0` selects an ephemeral port for testing. TLS is optional via environment variables (below); never expose the plaintext default to an untrusted network.
 
 Simulator options use `--name value`: `--host`, `--port`, `--site`, `--nodes`, `--fault`, `--fault-after-seconds`, and `--duration-seconds`. Defaults are `127.0.0.1`, `1883`, `warehouse-a`, five nodes, no fault, six seconds before an enabled fault, and unlimited duration.
 
@@ -60,13 +60,38 @@ The engine accepts `--host`, `--port`, `--alerts`, and `--duration-seconds` (zer
 mvn -pl dashboard javafx:run -Djavafx.args="--host=127.0.0.1 --port=1883"
 ```
 
-All applications read `FROSTMQ_PASSWORD`, falling back to the public demo password below. The dashboard uses `viewer` unless `--username=...` is supplied. It can reconnect using its Retry/Reconnect button; there is no automatic reconnect or durable application queue.
+All applications read `FROSTMQ_PASSWORD`, falling back to the public demo password below. The dashboard uses `viewer` unless `--username=...` is supplied. It can reconnect using its Retry/Reconnect button; the rule engine reconnects automatically with exponential backoff and replays its subscriptions. There is no durable application queue, so messages published while a client is offline are lost.
+
+### TLS
+
+The broker and client remain plaintext by default. To enable server-authenticated TLS, create a PKCS12 server keystore and a truststore containing its certificate:
+
+```sh
+keytool -genkeypair -alias frostmq -keyalg RSA -keysize 2048 -validity 365 \
+  -storetype PKCS12 -keystore server.p12 -storepass changeit \
+  -dname "CN=localhost" -ext "SAN=IP:127.0.0.1,dns:localhost" -noprompt
+keytool -exportcert -alias frostmq -keystore server.p12 -storepass changeit -file server.crt
+keytool -importcert -noprompt -alias frostmq -file server.crt \
+  -keystore trust.p12 -storetype PKCS12 -storepass changeit
+```
+
+Start the broker with its keystore, then start the applications with the truststore:
+
+```sh
+FROSTMQ_TLS_KEYSTORE=server.p12 FROSTMQ_TLS_KEYSTORE_PASSWORD=changeit \
+  java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar
+
+FROSTMQ_TLS_TRUSTSTORE=trust.p12 FROSTMQ_TLS_TRUSTSTORE_PASSWORD=changeit \
+  mvn -pl demo-apps exec:java -Dexec.mainClass=io.frostmq.demo.RuleEngine
+```
+
+The client verifies the broker hostname against the certificate SAN using HTTPS endpoint identification. Keep the SAN aligned with `--host`/`FROSTMQ_TLS_*`; for example, use `SAN=IP:127.0.0.1` when connecting to `127.0.0.1`. TLS is server-authenticated only: there are no client certificates, so MQTT usernames and passwords still need to be strong. Without the keystore/truststore variables, the demo stays plaintext on loopback.
 
 ## Credentials and ACLs
 
 `users.json` contains public demonstration accounts: `sensor01` through `sensor10`, `engine`, and `viewer`. Their demo password is `frostmq-demo`. These are not production credentials. Change them before using real data.
 
-Passwords are stored as Base64 PBKDF2-HMAC-SHA256 hashes with 210,000 iterations, 16-byte per-account salts, and 256-bit derived keys. Authentication uses constant-time hash comparison. `acl.json` is the policy from the blueprint. Device usernames must equal client IDs; subscription authorization checks containment of the requested filter, not just a match against its text. Wills must also be authorized.
+Passwords are stored as Base64 PBKDF2-HMAC-SHA256 hashes with 210,000 iterations, 16-byte per-account salts, and 256-bit derived keys. Authentication uses constant-time hash comparison. `acl.json` is the policy from the blueprint. Device usernames must equal client IDs; subscription authorization checks containment of the requested filter, not just a match against its text. A live client ID can only be replaced by a session authenticated as the same account, and account usernames are reserved so another account cannot claim a device ID while it is offline. Wills must also be authorized.
 
 Add an account or replace its password using the JDK-only credential utility. It reads a hidden console prompt when possible, or `FROSTMQ_PASSWORD` when set:
 
@@ -95,16 +120,17 @@ Callbacks run on the client reader virtual thread. Blocking QoS 1 publishes, sub
 
 ## Protocol and limits
 
-- CONNECT must be the first packet and complete within ten seconds. Only protocol name `MQTT`, level 4, and Clean Session 1 are accepted. Empty non-device client IDs receive generated UUIDs.
+- CONNECT must be the first packet and complete within ten seconds. Only protocol name `MQTT`, level 4, and Clean Session 1 are accepted. Empty non-device client IDs receive generated UUIDs. Device IDs must equal the authenticated device username; other accounts cannot use any account username as their client ID.
 - QoS 0 and 1, retained messages, Last Wills, wildcard subscriptions, unsubscribe, and heartbeat packets are supported. QoS 2 PUBLISH and QoS 2 handshake packets close the connection; QoS 2 subscription requests are downgraded to 1.
 - Remaining Length is capped at 262,144 bytes, including the variable header and payload, matching the blueprint's decoder. Malformed UTF-8, invalid fixed flags, zero packet identifiers, malformed topics, and truncated frames are rejected.
 - Each connection has one reader and one writer virtual thread. Publishers use nonblocking queue offers rather than writing subscriber sockets. Each outbound queue holds 1,000 packets: overflowing QoS 0 is dropped and counted; overflowing QoS 1 closes the subscriber.
 - QoS 1 deliveries use per-session identifiers, tracked acknowledgements, and five-second duplicate retries. Unacknowledged deliveries are also capped at 1,000 to bound memory.
 - Keep-alive expiry is checked every 100 ms against the 1.5× deadline. Keep-alive zero disables it after CONNECT.
 - Unauthorized PUBLISH messages are dropped and logged; the sixth consecutive violation closes the socket. An authorized publish resets the counter. Unauthorized subscriptions receive SUBACK `0x80`.
+- Connections above the connection quota are closed on accept. Subscriptions above the per-session or total filter quota receive SUBACK `0x80`. New retained topics above quota are not stored; replacing or deleting an existing retained topic is still allowed.
 - Overlapping subscriptions are coalesced to one delivery at the highest granted QoS. Live deliveries have RETAIN false; retained subscription replay has RETAIN true. An empty retained payload deletes the stored value.
 
-This is an in-memory subset, not a production broker: no persistent sessions, QoS 2, WebSockets, TLS, clustering, or retained-store disk persistence. The subscription index uses a read/write-locked filter map rather than a specialized trie. Broker queues are bounded, but the total connection count and retained topic count are not capped. The engine's worker queue holds 10,000 events and logs overflow; its CSV output is local to the process.
+This is an in-memory subset, not a production broker: no persistent sessions, QoS 2, WebSockets, clustering, or retained-store disk persistence. TLS is available as an optional server-authenticated transport, not as mutual TLS. The subscription index uses a read/write-locked filter map rather than a specialized trie. Connections, subscription filters per session, total filters, and retained topics are capped at 1,024, 100, 10,000, and 10,000 by default. Override them with `FROSTMQ_MAX_CONNECTIONS`, `FROSTMQ_MAX_FILTERS_PER_SESSION`, `FROSTMQ_MAX_FILTERS`, and `FROSTMQ_MAX_RETAINED`. The engine's worker queue holds 10,000 events and logs overflow; its CSV output is local to the process and prefixes formula-like topic values per OWASP CSV-injection guidance. The engine reconnects with capped exponential backoff, replays both subscriptions, and retries transient QoS 1 alert publishes; events published while it is offline are not replayed by the broker.
 
 ## Tests
 
@@ -112,7 +138,7 @@ This is an in-memory subset, not a production broker: no persistent sessions, Qo
 mvn -B verify
 ```
 
-Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, protocol edge cases, queue overflow, QoS 1 retries, concurrent publishes, client timeouts, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
+Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, client-ID isolation, protocol edge cases, queue overflow, connection/subscription/retained quotas, TLS round-trips, QoS 1 retries, concurrent publishes, client timeouts, CSV-injection handling, rule-engine broker-restart recovery, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
 
 For an independent standard-client check:
 

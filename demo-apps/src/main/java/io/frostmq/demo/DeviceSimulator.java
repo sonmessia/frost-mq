@@ -3,6 +3,8 @@ package io.frostmq.demo;
 import com.google.gson.*;
 import io.frostmq.client.*;
 import io.frostmq.common.*;
+import javax.net.ssl.SSLContext;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
@@ -21,15 +23,17 @@ public final class DeviceSimulator implements AutoCloseable {
         Node(String id, boolean actuator) { this.id = id; this.actuator = actuator; }
     }
     private final DemoSettings settings;
+    private final SSLContext tls;
     private final Map<String, Node> nodes = new LinkedHashMap<>();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicBoolean running = new AtomicBoolean();
     private boolean started;
 
-    public DeviceSimulator(String host, int port, String site, int count, String password) {
+    public DeviceSimulator(String host, int port, String site, int count, String password) throws IOException {
         if (count < 1) throw new IllegalArgumentException("Node count must be positive");
         if (!TopicMatcher.validTopic(site) || site.contains("/")) throw new IllegalArgumentException("Invalid site");
         settings = new DemoSettings(host, port, site, password, Map.of());
+        tls = Tls.clientFromEnvironment();
         for (int i = 1; i <= count; i++) {
             String id = String.format(Locale.ROOT, "sensor%02d", i);
             nodes.put(id, new Node(id, i <= 2));
@@ -60,7 +64,7 @@ public final class DeviceSimulator implements AutoCloseable {
         var will = new PublishPacket(base + "/status", bytes("offline"), 1, true, false, 0);
         try {
             node.client.connect(new ConnectOptions(settings.host(), settings.port(), node.id, node.id,
-                    bytes(settings.password()), 30, will));
+                    bytes(settings.password()), 30, will, tls));
             if (node.actuator) {
                 int grant = node.client.subscribe("coldchain/+/" + node.id + "/cmd", 1, (topic, payload, qos, retained) -> {
                     try {

@@ -1,6 +1,7 @@
 package io.frostmq.client;
 
 import io.frostmq.common.*;
+import javax.net.ssl.*;
 import java.io.IOException;
 import java.net.*;
 import java.util.List;
@@ -13,7 +14,7 @@ public final class BlockingMqttClient implements MqttClient {
     private static final System.Logger LOG = System.getLogger(BlockingMqttClient.class.getName());
     private record Request(MqttPacketType expected, CompletableFuture<MqttPacket> future) {}
     private static final class Connection {
-        final Socket socket = new Socket();
+        final Socket socket;
         final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
         final ReentrantLock writeLock = new ReentrantLock();
         final Object subscriptionLock = new Object();
@@ -27,7 +28,7 @@ public final class BlockingMqttClient implements MqttClient {
         volatile Thread reader;
         volatile long lastWrite = System.nanoTime();
         volatile long pingSent;
-        Connection(int keepAlive) { this.keepAlive = keepAlive; }
+        Connection(int keepAlive, Socket socket) { this.keepAlive = keepAlive; this.socket = socket; }
         synchronized int reserve(Request request) throws MqttException {
             if (pending.size() == 65535) throw new MqttException("No packet identifiers available");
             do { nextId = nextId % 65535 + 1; } while (pending.containsKey(nextId));
@@ -48,12 +49,27 @@ public final class BlockingMqttClient implements MqttClient {
         lifecycle.lock();
         try {
             if (connection != null && !connection.closed.get()) throw new MqttException("Already connected");
-            Connection c = new Connection(options.keepAliveSeconds());
+            Socket socket;
+            try {
+                socket = options.sslContext() == null ? new Socket()
+                        : options.sslContext().getSocketFactory().createSocket();
+            } catch (IOException e) {
+                throw new MqttException("Cannot create client socket", e);
+            }
+            Connection c = new Connection(options.keepAliveSeconds(), socket);
             connection = c;
             try {
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
                 c.socket.connect(new InetSocketAddress(options.host(), options.port()), 10_000);
                 c.socket.setTcpNoDelay(true);
+                if (c.socket instanceof SSLSocket tlsSocket) {
+                    c.socket.setSoTimeout(10_000);
+                    SSLParameters parameters = tlsSocket.getSSLParameters();
+                    parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                    tlsSocket.setSSLParameters(parameters);
+                    tlsSocket.startHandshake();
+                    c.socket.setSoTimeout(0);
+                }
                 c.workers.submit(() -> readLoop(c));
                 send(c, new ConnectPacket("MQTT", 4, options.clientId(), true, options.keepAliveSeconds(),
                         options.username(), options.password(), options.willMessage()));

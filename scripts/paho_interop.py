@@ -79,6 +79,8 @@ def main():
         assert viewer.subscribe("coldchain/#") == [1]
         device = peer("sensor01", client_id="sensor01")
         assert device.connect_code == 0
+        takeover = peer("viewer", client_id="sensor01")
+        assert takeover.connect_code == 133  # Another account cannot take the device ID.
         assert device.subscribe("coldchain/+/sensor01/cmd", qos=2) == [1]
         assert device.subscribe("coldchain/+/+/cmd") == [128]
         assert device.subscribe("coldchain/#") == [128]

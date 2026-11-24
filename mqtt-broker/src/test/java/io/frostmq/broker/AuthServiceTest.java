@@ -18,6 +18,13 @@ class AuthServiceTest {
         assertTrue(auth.canSubscribe(device, "coldchain/+/sensor01/cmd"));
         assertFalse(auth.canSubscribe(device, "coldchain/+/+/cmd"));
         assertFalse(auth.canSubscribe(device, "coldchain/#"));
+        var viewer = auth.authenticate("viewer", "frostmq-demo".getBytes(StandardCharsets.UTF_8)).orElseThrow();
+        assertTrue(auth.canUseClientId(device, "sensor01"));
+        assertFalse(auth.canUseClientId(device, "sensor02"));
+        assertTrue(auth.canUseClientId(viewer, "viewer"));
+        assertTrue(auth.canUseClientId(viewer, "dashboard-123"));
+        assertFalse(auth.canUseClientId(viewer, "sensor01"));
+        assertFalse(auth.canUseClientId(viewer, "engine"));
         assertTrue(auth.authenticate("unknown", "frostmq-demo".getBytes(StandardCharsets.UTF_8)).isEmpty());
         assertTrue(auth.authenticate("sensor01", "wrong".getBytes(StandardCharsets.UTF_8)).isEmpty());
         assertTrue(auth.authenticate("sensor01", null).isEmpty());

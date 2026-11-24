@@ -148,6 +148,49 @@ class BrokerProtocolTest {
         assertEquals(0, broker.retained().size());
     }
 
+    @Test void deviceClientIdCannotBeClaimedByAnotherAccount() throws Exception {
+        Socket device = connect(options("sensor01", "sensor01", 30, null));
+        for (String user : List.of("viewer", "engine")) {
+            Socket impostor = raw();
+            send(impostor, options("sensor01", user, 30, null));
+            assertEquals(new ConnackPacket(false, 2), read(impostor));
+            assertNull(read(impostor));
+        }
+        send(device, new PingReqPacket());
+        assertEquals(new PingRespPacket(), read(device));
+        assertEquals(1, broker.sessionCount());
+        send(device, new DisconnectPacket());
+        assertNull(read(device));
+        awaitRemoved();
+        Socket squat = raw();
+        send(squat, options("sensor01", "viewer", 30, null));
+        assertEquals(new ConnackPacket(false, 2), read(squat));
+        assertNull(read(squat));
+    }
+
+    @Test void rejectedClientIdTakeoverKeepsDeviceWillArmed() throws Exception {
+        Socket watcher = viewer(STATUS, 0);
+        Socket device = connect(options("sensor01", "sensor01", 30, publish(STATUS, "offline", 1, true, 0)));
+        Socket impostor = raw();
+        send(impostor, options("sensor01", "viewer", 30, null));
+        assertEquals(new ConnackPacket(false, 2), read(impostor));
+        assertNull(read(impostor));
+        device.close();
+        PublishPacket will = (PublishPacket) read(watcher);
+        assertArrayEquals("offline".getBytes(StandardCharsets.UTF_8), will.payload());
+    }
+
+    @Test void liveClientIdCannotBeReplacedByAnotherAccount() throws Exception {
+        Socket first = connect("shared-session", "viewer");
+        Socket second = raw();
+        send(second, options("shared-session", "engine", 30, null));
+        assertEquals(new ConnackPacket(false, 2), read(second));
+        assertNull(read(second));
+        send(first, new PingReqPacket());
+        assertEquals(new PingRespPacket(), read(first));
+        assertEquals(1, broker.sessionCount());
+    }
+
     @Test void abruptDisconnectAndKeepAlivePublishWillOnce() throws Exception {
         Socket viewer = viewer(STATUS, 0);
         Socket device = connect(options("sensor01", "sensor01", 30, publish(STATUS, "offline", 1, true, 0)));

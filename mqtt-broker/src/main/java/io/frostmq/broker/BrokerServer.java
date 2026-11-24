@@ -1,19 +1,24 @@
 package io.frostmq.broker;
 
 import io.frostmq.common.*;
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.net.*;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.LongAdder;
 
 public final class BrokerServer implements AutoCloseable {
+    private static final System.Logger LOG = System.getLogger(BrokerServer.class.getName());
     private final AuthService auth;
     private final String host;
     private final int requestedPort;
-    private final SubscriptionTree subscriptions = new SubscriptionTree();
-    private final RetainedStore retained = new RetainedStore();
+    private final SSLContext sslContext;
+    private final BrokerLimits limits;
+    private final SubscriptionTree subscriptions;
+    private final RetainedStore retained;
     private final ConcurrentHashMap<String, ClientSession> sessions = new ConcurrentHashMap<>();
     private final Set<ClientSession> connections = ConcurrentHashMap.newKeySet();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
@@ -25,13 +30,31 @@ public final class BrokerServer implements AutoCloseable {
     private boolean closed;
 
     public BrokerServer(String host, int port, AuthService auth) {
-        this.host = host; this.requestedPort = port; this.auth = auth;
+        this(host, port, auth, null, BrokerLimits.DEFAULT);
     }
     public BrokerServer(int port, AuthService auth) { this("127.0.0.1", port, auth); }
+    public BrokerServer(String host, int port, AuthService auth, SSLContext sslContext) {
+        this(host, port, auth, sslContext, BrokerLimits.DEFAULT);
+    }
+    public BrokerServer(int port, AuthService auth, SSLContext sslContext) {
+        this("127.0.0.1", port, auth, sslContext);
+    }
+    public BrokerServer(int port, AuthService auth, BrokerLimits limits) {
+        this("127.0.0.1", port, auth, null, limits);
+    }
+    public BrokerServer(String host, int port, AuthService auth, SSLContext sslContext, BrokerLimits limits) {
+        this.host = host;
+        this.requestedPort = port;
+        this.auth = auth;
+        this.sslContext = sslContext;
+        this.limits = Objects.requireNonNull(limits);
+        subscriptions = new SubscriptionTree(limits);
+        retained = new RetainedStore(limits.maxRetainedMessages());
+    }
 
     public synchronized void start() throws IOException {
         if (running || closed) throw new IllegalStateException("Broker already started or closed");
-        var socket = new ServerSocket();
+        var socket = sslContext == null ? new ServerSocket() : sslContext.getServerSocketFactory().createServerSocket();
         try {
             socket.setReuseAddress(true);
             socket.bind(new InetSocketAddress(host, requestedPort));
@@ -49,6 +72,12 @@ public final class BrokerServer implements AutoCloseable {
         while (running) {
             try {
                 Socket socket = serverSocket.accept();
+                if (connections.size() >= limits.maxConnections()) {
+                    socket.close();
+                    dropped.increment();
+                    LOG.log(System.Logger.Level.WARNING, "Connection limit reached; socket rejected");
+                    continue;
+                }
                 socket.setTcpNoDelay(true);
                 var session = new ClientSession(this, socket);
                 connections.add(session);
@@ -65,7 +94,12 @@ public final class BrokerServer implements AutoCloseable {
         ClientSession old;
         synchronized (session) {
             if (!running || session.isClosed()) return false;
-            old = sessions.put(session.clientId, session);
+            old = sessions.get(session.clientId);
+            if (old != null && old != session && !Objects.equals(old.username, session.username)) {
+                session.reject(2);
+                return false;
+            }
+            sessions.put(session.clientId, session);
             session.connected = true;
             session.lastPacketNanos = System.nanoTime();
         }
@@ -80,7 +114,8 @@ public final class BrokerServer implements AutoCloseable {
     }
 
     public void route(PublishPacket packet) {
-        retained.update(packet);
+        if (packet.retain() && !retained.update(packet))
+            LOG.log(System.Logger.Level.WARNING, "Retained message dropped: quota reached");
         subscriptions.match(packet.topic()).forEach((session, qos) -> session.deliver(packet, qos, false));
     }
 
@@ -108,10 +143,11 @@ public final class BrokerServer implements AutoCloseable {
         Path users = Path.of(args.length > 1 ? args[1] : "users.json");
         Path acl = Path.of(args.length > 2 ? args[2] : "acl.json");
         String host = args.length > 3 ? args[3] : "127.0.0.1";
-        var broker = new BrokerServer(host, port, new AuthService(users, acl));
+        var tls = Tls.serverFromEnvironment();
+        var broker = new BrokerServer(host, port, new AuthService(users, acl), tls, BrokerLimits.fromEnvironment());
         Runtime.getRuntime().addShutdownHook(new Thread(broker::close));
         broker.start();
-        System.out.println("FrostMQ listening on " + host + ":" + broker.port());
+        System.out.println("FrostMQ listening on " + host + ":" + broker.port() + (tls == null ? "" : " (TLS)"));
         new CountDownLatch(1).await();
     }
 }

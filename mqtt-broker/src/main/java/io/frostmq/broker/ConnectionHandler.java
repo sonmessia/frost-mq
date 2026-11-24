@@ -52,7 +52,7 @@ final class ConnectionHandler implements Runnable {
         if (authenticated.isEmpty()) { session.reject(4); return false; }
         var principal = authenticated.get();
         String id = connect.clientId().isEmpty() ? UUID.randomUUID().toString() : connect.clientId();
-        if (principal.role().equals("device") && !id.equals(principal.username())) { session.reject(2); return false; }
+        if (!broker.auth().canUseClientId(principal, id)) { session.reject(2); return false; }
         PublishPacket will = connect.willMessage();
         if (will != null && (will.qos() > 1 || !broker.auth().canPublish(principal, will.topic()))) {
             session.reject(4); return false;
@@ -85,8 +85,8 @@ final class ConnectionHandler implements Runnable {
         for (var request : packet.subscriptions()) {
             if (!broker.auth().canSubscribe(session.principal, request.filter())) { codes.add(128); continue; }
             int granted = Math.min(request.qos(), 1);
+            if (!broker.subscriptions().subscribe(session, request.filter(), granted)) { codes.add(128); continue; }
             codes.add(granted);
-            broker.subscriptions().subscribe(session, request.filter(), granted);
             for (PublishPacket message : broker.retained().matching(request.filter())) {
                 retained.put(message.topic(), message);
                 retainedQos.merge(message.topic(), granted, Math::max);

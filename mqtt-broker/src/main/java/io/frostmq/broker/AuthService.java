@@ -72,6 +72,15 @@ public final class AuthService {
         return Optional.empty();
     }
 
+    /**
+     * Account usernames are reserved client IDs. This lets a device keep its identity even while
+     * offline, and prevents a viewer or engine from squatting on a device ID between reconnects.
+     */
+    public boolean canUseClientId(Principal principal, String clientId) {
+        if (principal.role().equals("device")) return clientId.equals(principal.username());
+        return clientId.equals(principal.username()) || !accounts.containsKey(clientId);
+    }
+
     public boolean canPublish(Principal principal, String topic) {
         Permissions permission = acl.get(principal.role());
         return permission != null && permission.publish.stream()
