@@ -26,12 +26,18 @@ public final class DashboardApp extends Application {
   private final Label deviceCount = new Label("0");
   private final Label onlineCount = new Label("0");
   private final Label criticalCount = new Label("0");
-  private final Label title = new Label("Cold-chain overview");
-  private final Label subtitle = new Label("Live conditions across your refrigerated fleet");
-  private final Button reconnect = new Button("Connect");
+  private final Label alertCount = new Label("0");
+  private final Label conditionTitle = new Label("Waiting for telemetry");
+  private final Label conditionDetail = new Label("Start the simulator to establish a fleet baseline.");
+  private final Label title = new Label("Fleet overview");
+  private final Label subtitle = new Label("Live refrigeration conditions and device health");
+  private final Button reconnect = new Button("Retry now");
   private final BorderPane content = new BorderPane();
+  private final Region connectionSignal = new Region();
+  private final HBox connectionBadge = new HBox(8, connectionSignal, connection);
   private volatile boolean closing;
   private volatile ReconnectingMqttSession feed;
+  private HBox conditionPanel;
   private Node deviceScreen;
   private Node alertScreen;
 
@@ -40,17 +46,22 @@ public final class DashboardApp extends Application {
     var root = new BorderPane();
     root.getStyleClass().add("app");
     root.setLeft(sidebar());
-    var main = new VBox(24);
+    var main = new VBox(22);
     main.setPadding(new Insets(32));
     title.getStyleClass().add("page-title");
     subtitle.getStyleClass().add("muted");
     var heading = new VBox(8, title, subtitle);
-    var top = new HBox(24, heading, new Region(), connection, reconnect);
+    connectionSignal.getStyleClass().add("connection-signal");
+    connectionBadge.getStyleClass().addAll("connection-badge", "connection-offline");
+    connectionBadge.setAlignment(Pos.CENTER_LEFT);
+    var top = new HBox(16, heading, new Region(), connectionBadge, reconnect);
+    top.getStyleClass().add("top-bar");
     HBox.setHgrow(top.getChildren().get(1), Priority.ALWAYS);
     top.setAlignment(Pos.CENTER_LEFT);
-    connection.getStyleClass().add("connection");
+    connection.getStyleClass().add("connection-text");
     connection.setId("connection-status");
     reconnect.getStyleClass().add("primary-button");
+    showRetry(false);
     reconnect.setOnAction(event -> {
       ReconnectingMqttSession current = feed;
       if (current != null)
@@ -62,7 +73,7 @@ public final class DashboardApp extends Application {
     VBox.setVgrow(content, Priority.ALWAYS);
     main.getChildren().addAll(top, content);
     root.setCenter(main);
-    Scene scene = new Scene(root, 1240, 800);
+    Scene scene = new Scene(root, 1280, 820);
     scene.getStylesheets().add(Objects.requireNonNull(getClass().getResource("dashboard.css")).toExternalForm());
     stage.setTitle("FrostMQ · Cold-chain monitor");
     stage.setMinWidth(960);
@@ -73,9 +84,14 @@ public final class DashboardApp extends Application {
   }
 
   private Node sidebar() {
-    var brand = new Label("FROSTMQ");
+    var mark = new Label("F");
+    mark.getStyleClass().add("brand-mark");
+    var brand = new Label("FrostMQ");
     brand.getStyleClass().add("brand");
-    var caption = new Label("COLD-CHAIN OPERATIONS");
+    var brandRow = new HBox(12, mark, brand);
+    brandRow.getStyleClass().add("brand-row");
+    brandRow.setAlignment(Pos.CENTER_LEFT);
+    var caption = new Label("Cold-chain control");
     caption.getStyleClass().add("sidebar-caption");
     var group = new ToggleGroup();
     var fleet = new ToggleButton("Device fleet");
@@ -92,20 +108,20 @@ public final class DashboardApp extends Application {
     fleet.setOnAction(event -> {
       fleet.setSelected(true);
       content.setCenter(deviceScreen);
-      title.setText("Cold-chain overview");
-      subtitle.setText("Live conditions across your refrigerated fleet");
+      title.setText("Fleet overview");
+      subtitle.setText("Live refrigeration conditions and device health");
     });
     log.setOnAction(event -> {
       log.setSelected(true);
       content.setCenter(alertScreen);
-      title.setText("Alert stream");
-      subtitle.setText("Temperature excursions, recoveries, and device disconnects");
+      title.setText("Incident ledger");
+      subtitle.setText("Temperature excursions, recoveries, and connection loss");
     });
     var spacer = new Region();
     VBox.setVgrow(spacer, Priority.ALWAYS);
-    var footer = new Label("MQTT 3.1.1\nQoS 0 / 1 · Clean sessions\nJava 25 · Virtual threads");
+    var footer = new Label("MQTT 3.1.1\nClean-session telemetry\nJava 25 virtual threads");
     footer.getStyleClass().add("sidebar-footer");
-    var side = new VBox(16, brand, caption, new Separator(), fleet, log, spacer, footer);
+    var side = new VBox(16, brandRow, caption, new Separator(), fleet, log, spacer, footer);
     side.setPadding(new Insets(32, 24, 32, 24));
     side.setPrefWidth(224);
     side.getStyleClass().add("sidebar");
@@ -113,18 +129,34 @@ public final class DashboardApp extends Application {
   }
 
   private Node devicesScreen() {
-    var metrics = new HBox(16,
-        metric("REGISTERED DEVICES", deviceCount, "Sensors seen by the monitor"),
-        metric("ONLINE NOW", onlineCount, "Connected and reporting"),
-        metric("ABOVE 8 °C", criticalCount, "Requires cooling intervention"));
-    metrics.getChildren().forEach(node -> HBox.setHgrow(node, Priority.ALWAYS));
+    conditionTitle.getStyleClass().add("condition-title");
+    conditionTitle.setWrapText(true);
+    conditionDetail.getStyleClass().add("condition-detail");
+    conditionDetail.setWrapText(true);
+    var conditionCopy = new VBox(7, new Label("Fleet condition"), conditionTitle, conditionDetail);
+    conditionCopy.getChildren().getFirst().getStyleClass().add("condition-label");
+    conditionCopy.getStyleClass().add("condition-copy");
+    HBox.setHgrow(conditionCopy, Priority.ALWAYS);
+    conditionPanel = new HBox(0, conditionCopy,
+        operationalMetric("Devices seen", deviceCount, "retained in view"),
+        operationalMetric("Reporting", onlineCount, "currently online"),
+        operationalMetric("Above limit", criticalCount, "warmer than 8 °C"));
+    conditionPanel.setAlignment(Pos.CENTER_LEFT);
+    conditionPanel.getStyleClass().addAll("condition-panel", "condition-waiting");
+
     var table = new TableView<DashboardModel.Device>(devices);
     table.setId("device-table");
     table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-    table.setPlaceholder(new Label("No devices yet.\nStart DeviceSimulator to see live cold-chain telemetry."));
-    table.getColumns().add(column("SITE", DashboardModel.Device::site));
-    table.getColumns().add(column("DEVICE", DashboardModel.Device::id));
-    var status = column("STATUS", DashboardModel.Device::status);
+    table
+        .setPlaceholder(new Label("No devices are reporting yet.\nStart DeviceSimulator to populate the live roster."));
+    var site = column("Site", DashboardModel.Device::site);
+    site.setPrefWidth(132);
+    table.getColumns().add(site);
+    var device = column("Device", DashboardModel.Device::id);
+    device.setPrefWidth(112);
+    table.getColumns().add(device);
+    var status = column("Status", DashboardModel.Device::status);
+    status.setPrefWidth(112);
     status.setCellFactory(ignored -> new TableCell<>() {
       @Override
       protected void updateItem(String value, boolean empty) {
@@ -134,13 +166,18 @@ public final class DashboardApp extends Application {
           setGraphic(null);
           return;
         }
-        var label = new Label(value.toUpperCase(Locale.ROOT));
-        label.getStyleClass().addAll("status-pill", "status-" + value);
-        setGraphic(label);
+        var dot = new Region();
+        dot.getStyleClass().addAll("status-dot", "status-" + value);
+        var label = new Label(value.substring(0, 1).toUpperCase(Locale.ROOT) + value.substring(1));
+        label.getStyleClass().add("status-text");
+        var indicator = new HBox(7, dot, label);
+        indicator.setAlignment(Pos.CENTER_LEFT);
+        setGraphic(indicator);
       }
     });
     table.getColumns().add(status);
-    var temperature = column("TEMP °C", DashboardModel.Device::temperature);
+    var temperature = column("Temperature", DashboardModel.Device::temperature);
+    temperature.setPrefWidth(112);
     temperature.setCellFactory(ignored -> new TableCell<>() {
       @Override
       protected void updateItem(Double value, boolean empty) {
@@ -152,24 +189,37 @@ public final class DashboardApp extends Application {
       }
     });
     table.getColumns().add(temperature);
-    table.getColumns()
-        .add(column("HUMIDITY", d -> d.humidity() == null ? "—" : String.format(Locale.ROOT, "%.1f %%", d.humidity())));
-    table.getColumns().add(column("DOOR", d -> d.door() == null ? "—" : d.door() == 1 ? "Open" : "Closed"));
-    table.getColumns()
-        .add(column("UPDATED", d -> d.updated() == 0 ? "—" : TIME.format(Instant.ofEpochMilli(d.updated()))));
-    var section = new Label("DEVICE FLEET");
-    section.getStyleClass().add("section-label");
-    var note = new Label("Healthy target: 4 °C  ·  Alert above 8 °C  ·  Recovery below 6 °C");
+    table.getColumns().add(column("Humidity",
+        d -> d.humidity() == null ? "—" : String.format(Locale.ROOT, "%.1f %%", d.humidity())));
+    table.getColumns().add(column("Door", d -> d.door() == null ? "—" : d.door() == 1 ? "Open" : "Closed"));
+    table.getColumns().add(column("Updated",
+        d -> d.updated() == 0 ? "—" : TIME.format(Instant.ofEpochMilli(d.updated()))));
+    var section = new Label("Live device roster");
+    section.getStyleClass().add("section-title");
+    var note = new Label("Target 4 °C     Alert above 8 °C     Recovery below 6 °C");
     note.getStyleClass().add("muted");
-    var screen = new VBox(16, metrics, section, table, note);
+    var screen = new VBox(16, conditionPanel, section, table, note);
     VBox.setVgrow(table, Priority.ALWAYS);
     return screen;
   }
 
   private Node alertsScreen() {
+    alertCount.getStyleClass().add("archive-count");
+    var archiveCopy = new VBox(5, new Label("Incident archive"),
+        new Label("Operational events received during this dashboard session."));
+    archiveCopy.getChildren().getFirst().getStyleClass().add("archive-title");
+    archiveCopy.getChildren().getLast().getStyleClass().add("muted-on-dark");
+    HBox.setHgrow(archiveCopy, Priority.ALWAYS);
+    var archiveMetric = new VBox(3, alertCount, new Label("events retained"));
+    archiveMetric.getStyleClass().add("archive-metric");
+    archiveMetric.getChildren().getLast().getStyleClass().add("muted-on-dark");
+    var archive = new HBox(24, archiveCopy, archiveMetric);
+    archive.setAlignment(Pos.CENTER_LEFT);
+    archive.getStyleClass().add("archive-strip");
+
     var list = new ListView<DashboardModel.Alert>(alerts);
     list.setId("alert-list");
-    list.setPlaceholder(new Label("No alerts received.\nRun the rule engine, then inject a temperature fault."));
+    list.setPlaceholder(new Label("No incidents recorded.\nRun the rule engine and inject a temperature fault."));
     list.setCellFactory(ignored -> new ListCell<>() {
       @Override
       protected void updateItem(DashboardModel.Alert alert, boolean empty) {
@@ -179,9 +229,12 @@ public final class DashboardApp extends Application {
           setGraphic(null);
           return;
         }
+        String level = alert.severity().toLowerCase(Locale.ROOT);
+        var rail = new Region();
+        rail.getStyleClass().addAll("alert-rail", "rail-" + level);
         var severity = new Label(alert.severity());
-        severity.getStyleClass().addAll("status-pill", "alert-" + alert.severity().toLowerCase(Locale.ROOT));
-        severity.setMinWidth(104);
+        severity.getStyleClass().addAll("severity-label", "severity-" + level);
+        severity.setMinWidth(92);
         String description = alert.rule().equals("device-offline") ? "Device disconnected"
             : alert.severity().equals("RESOLVED") ? "Temperature back within range" : "High-temperature excursion";
         var name = new Label(alert.device() + "  ·  " + alert.site());
@@ -193,32 +246,32 @@ public final class DashboardApp extends Application {
         var spacer = new Region();
         var time = new Label(TIME.format(Instant.ofEpochMilli(alert.timestamp())));
         time.getStyleClass().add("muted");
-        var row = new HBox(24, severity, text, spacer, time);
+        var row = new HBox(18, rail, severity, text, spacer, time);
+        row.getStyleClass().add("alert-row");
         row.setAlignment(Pos.CENTER_LEFT);
         row.setPadding(new Insets(16));
         HBox.setHgrow(spacer, Priority.ALWAYS);
         setGraphic(row);
       }
     });
-    var note = new Label(
-        "Newest first. The monitor keeps the latest 1,000 alerts; the rule engine archives alerts to CSV.");
+    var section = new Label("Recent incidents");
+    section.getStyleClass().add("section-title");
+    var note = new Label("Newest first. Up to 1,000 events stay in memory; the rule engine writes the CSV archive.");
     note.getStyleClass().add("muted");
-    var screen = new VBox(16, list, note);
+    var screen = new VBox(16, archive, section, list, note);
     VBox.setVgrow(list, Priority.ALWAYS);
     return screen;
   }
 
-  private static VBox metric(String label, Label value, String description) {
+  private static VBox operationalMetric(String label, Label value, String description) {
     var caption = new Label(label);
-    caption.getStyleClass().add("metric-caption");
-    value.getStyleClass().add("metric-value");
+    caption.getStyleClass().add("operational-label");
+    value.getStyleClass().add("operational-value");
     var detail = new Label(description);
-    detail.getStyleClass().add("muted");
-    detail.setWrapText(true);
-    var card = new VBox(8, caption, value, detail);
-    card.getStyleClass().add("metric-card");
-    card.setMaxWidth(Double.MAX_VALUE);
-    return card;
+    detail.getStyleClass().add("operational-detail");
+    var metric = new VBox(4, caption, value, detail);
+    metric.getStyleClass().add("operational-metric");
+    return metric;
   }
 
   private static <T> TableColumn<DashboardModel.Device, T> column(String label,
@@ -241,14 +294,14 @@ public final class DashboardApp extends Application {
       feed = new ReconnectingMqttSession(new BlockingMqttClient(), options,
           mqtt -> {
             if (mqtt.subscribe("coldchain/#", 1,
-                    (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload))) == 128)
+                (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload))) == 128)
               throw new MqttException("Viewer subscription denied");
           },
           state -> Platform.runLater(() -> showConnectionState(state)));
       feed.start();
     } catch (Exception e) {
       connection.setText("Invalid connection settings");
-      reconnect.setDisable(true);
+      showRetry(false);
     }
   }
 
@@ -257,21 +310,33 @@ public final class DashboardApp extends Application {
       return;
     switch (state.status()) {
       case CONNECTING -> {
-        connection.setText("Connecting…");
-        reconnect.setDisable(true);
-        reconnect.setText("Connecting");
+        setConnectionClass("connection-connecting");
+        connection.setText("Connecting to broker");
+        showRetry(false);
       }
       case CONNECTED -> {
-        connection.setText("Live · MQTT connected");
-        reconnect.setDisable(true);
-        reconnect.setText("Connected");
+        setConnectionClass("connection-live");
+        connection.setText("Live MQTT feed");
+        showRetry(false);
       }
       case RETRYING -> {
-        connection.setText("Connection lost · retrying…");
-        reconnect.setDisable(false);
-        reconnect.setText("Retry now");
+        setConnectionClass("connection-lost");
+        connection.setText("Connection lost; retrying");
+        showRetry(true);
       }
     }
+  }
+
+  private void setConnectionClass(String styleClass) {
+    connectionBadge.getStyleClass().removeAll(
+        "connection-offline", "connection-connecting", "connection-live", "connection-lost");
+    connectionBadge.getStyleClass().add(styleClass);
+  }
+
+  private void showRetry(boolean visible) {
+    reconnect.setManaged(visible);
+    reconnect.setVisible(visible);
+    reconnect.setDisable(!visible);
   }
 
   private void update(String topic, byte[] payload) {
@@ -282,6 +347,33 @@ public final class DashboardApp extends Application {
     deviceCount.setText(Integer.toString(devices.size()));
     onlineCount.setText(Long.toString(model.onlineCount()));
     criticalCount.setText(Long.toString(model.criticalCount()));
+    alertCount.setText(Integer.toString(alerts.size()));
+    updateFleetCondition();
+  }
+
+  private void updateFleetCondition() {
+    conditionPanel.getStyleClass().removeAll(
+        "condition-waiting", "condition-safe", "condition-warning", "condition-critical");
+    long seen = devices.size(), online = model.onlineCount(), critical = model.criticalCount();
+    if (seen == 0) {
+      conditionPanel.getStyleClass().add("condition-waiting");
+      conditionTitle.setText("Waiting for telemetry");
+      conditionDetail.setText("Start the simulator to establish a fleet baseline.");
+    } else if (critical > 0) {
+      conditionPanel.getStyleClass().add("condition-critical");
+      conditionTitle.setText(critical == 1 ? "Temperature excursion active" : "Temperature excursions active");
+      conditionDetail.setText(critical + (critical == 1 ? " device is" : " devices are")
+          + " above the 8 °C intervention threshold.");
+    } else if (online < seen) {
+      conditionPanel.getStyleClass().add("condition-warning");
+      conditionTitle.setText("Telemetry coverage interrupted");
+      conditionDetail.setText((seen - online) + (seen - online == 1 ? " device is" : " devices are")
+          + " offline or awaiting a fresh status update.");
+    } else {
+      conditionPanel.getStyleClass().add("condition-safe");
+      conditionTitle.setText("All monitored devices are in range");
+      conditionDetail.setText("Every registered sensor is online and below the alert threshold.");
+    }
   }
 
   @Override

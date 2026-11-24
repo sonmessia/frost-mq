@@ -1,16 +1,76 @@
 {
   "users": {
-    "sensor01": {"role":"device","iterations":210000,"salt":"hDii2sB3qyQ7HHQvhkurrQ==","hash":"5kUxwMs2E3KJkNLwYLjV5oiNBmSjtYcOpEHtrKPc8AQ="},
-    "sensor02": {"role":"device","iterations":210000,"salt":"vTSbFXfRuEcmTyx1HOEFSQ==","hash":"mjZvRi16GZk6SpAiclOgTyx1b3iCaRHIln1wnI8U0Po="},
-    "sensor03": {"role":"device","iterations":210000,"salt":"iJOPQ09DGx9mJzPbboH5CQ==","hash":"Z6erGOunbdTTMKQoYBR88yVFq45XKaeZhOpQK1zQ06I="},
-    "sensor04": {"role":"device","iterations":210000,"salt":"FUyi5RBesbtIldR2y9A7sw==","hash":"s1LQD0t1mgWqNZsKsIpzFFchVFT+aJAM/PJrCedDw+w="},
-    "sensor05": {"role":"device","iterations":210000,"salt":"nUnJpBn44CIoCLeNLuJQDg==","hash":"h7ee7mtlsfCBiCoPwv/zR38YZfcLzALKPCi7vzQpvzo="},
-    "sensor06": {"role":"device","iterations":210000,"salt":"xOAi6by9qPLpHkt1UeeVUg==","hash":"LIEWx7Qd9y5jRmbUdWc1WOTK8vsL3mC2CYx74gfaDKM="},
-    "sensor07": {"role":"device","iterations":210000,"salt":"NTJeVAEli7nKYgdN+WDF+w==","hash":"71ZeQ3uF+JpPQbtechlOFF2T+kSPYN8zwVZzA/4tplo="},
-    "sensor08": {"role":"device","iterations":210000,"salt":"18C5fxnJvh9tbwwqYmOL1w==","hash":"h2LWAWp/PiL7FQ9V02tpX+HzPM7HYIW3taBUcaCjjqU="},
-    "sensor09": {"role":"device","iterations":210000,"salt":"rXGimh9/Xp7rw3wEVAob9A==","hash":"1hrOH3b56+Erb4vjMxCrMhjiGl8FGUQYBvCfUIg+3JQ="},
-    "sensor10": {"role":"device","iterations":210000,"salt":"WThtJI5Kae+Z5kXnULHJgg==","hash":"dSbNIf2Wk0xZSZtsI3UEYNlIYHglqzgO+FrpVikwyDY="},
-    "engine": {"role":"engine","iterations":210000,"salt":"hPJywrEBBvExW1vd6NLK1Q==","hash":"G3YP8UXrOC9b5xNEjlZSLRo28O9+IN4NjwkV0YExW+k="},
-    "viewer": {"role":"viewer","iterations":210000,"salt":"MNImRaaQoOnz8ufd06zLvA==","hash":"4zftjCf1WC9Df+PEB5if4IENvlAFbRqE+75Rii37Jso="}
+    "sensor01": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "hDii2sB3qyQ7HHQvhkurrQ==",
+      "hash": "5kUxwMs2E3KJkNLwYLjV5oiNBmSjtYcOpEHtrKPc8AQ="
+    },
+    "sensor02": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "vTSbFXfRuEcmTyx1HOEFSQ==",
+      "hash": "mjZvRi16GZk6SpAiclOgTyx1b3iCaRHIln1wnI8U0Po="
+    },
+    "sensor03": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "iJOPQ09DGx9mJzPbboH5CQ==",
+      "hash": "Z6erGOunbdTTMKQoYBR88yVFq45XKaeZhOpQK1zQ06I="
+    },
+    "sensor04": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "FUyi5RBesbtIldR2y9A7sw==",
+      "hash": "s1LQD0t1mgWqNZsKsIpzFFchVFT+aJAM/PJrCedDw+w="
+    },
+    "sensor05": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "nUnJpBn44CIoCLeNLuJQDg==",
+      "hash": "h7ee7mtlsfCBiCoPwv/zR38YZfcLzALKPCi7vzQpvzo="
+    },
+    "sensor06": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "xOAi6by9qPLpHkt1UeeVUg==",
+      "hash": "LIEWx7Qd9y5jRmbUdWc1WOTK8vsL3mC2CYx74gfaDKM="
+    },
+    "sensor07": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "NTJeVAEli7nKYgdN+WDF+w==",
+      "hash": "71ZeQ3uF+JpPQbtechlOFF2T+kSPYN8zwVZzA/4tplo="
+    },
+    "sensor08": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "18C5fxnJvh9tbwwqYmOL1w==",
+      "hash": "h2LWAWp/PiL7FQ9V02tpX+HzPM7HYIW3taBUcaCjjqU="
+    },
+    "sensor09": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "rXGimh9/Xp7rw3wEVAob9A==",
+      "hash": "1hrOH3b56+Erb4vjMxCrMhjiGl8FGUQYBvCfUIg+3JQ="
+    },
+    "sensor10": {
+      "role": "device",
+      "iterations": 210000,
+      "salt": "WThtJI5Kae+Z5kXnULHJgg==",
+      "hash": "dSbNIf2Wk0xZSZtsI3UEYNlIYHglqzgO+FrpVikwyDY="
+    },
+    "engine": {
+      "role": "engine",
+      "iterations": 210000,
+      "salt": "hPJywrEBBvExW1vd6NLK1Q==",
+      "hash": "G3YP8UXrOC9b5xNEjlZSLRo28O9+IN4NjwkV0YExW+k="
+    },
+    "viewer": {
+      "role": "viewer",
+      "iterations": 210000,
+      "salt": "MNImRaaQoOnz8ufd06zLvA==",
+      "hash": "4zftjCf1WC9Df+PEB5if4IENvlAFbRqE+75Rii37Jso="
+    }
   }
 }

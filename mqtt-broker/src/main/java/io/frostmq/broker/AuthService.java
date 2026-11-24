@@ -14,127 +14,167 @@ import java.math.BigDecimal;
 import java.util.*;
 
 public final class AuthService {
-    public static final int ITERATIONS = 210_000;
-    public enum ClientIdPolicy { USERNAME_ONLY, USERNAME_OR_UNRESERVED }
-    public record Role(String name, ClientIdPolicy clientIdPolicy) {
-        public Role { Objects.requireNonNull(name); Objects.requireNonNull(clientIdPolicy); }
-    }
-    public record Principal(String username, Role role) {}
-    private record Account(Role role, byte[] salt, byte[] hash) {}
-    private record Permissions(List<String> publish, List<String> subscribe) {}
-    private final Map<String, Account> accounts;
-    private final Map<Role, Permissions> acl;
-    private final Account dummy;
+  public static final int ITERATIONS = 210_000;
 
-    public AuthService(Path usersPath, Path aclPath) throws IOException {
-        Map<String, Object> policies = object(load(aclPath));
-        var roles = new HashMap<String, Role>();
-        var permissions = new HashMap<Role, Permissions>();
-        for (var entry : policies.entrySet()) {
-            var policy = object(entry.getValue());
-            Role role = configuredRole(entry.getKey());
-            roles.put(entry.getKey(), role);
-            permissions.put(role, new Permissions(filters(policy.get("publish")), filters(policy.get("subscribe"))));
-        }
-        var loaded = new HashMap<String, Account>();
-        for (var entry : object(object(load(usersPath)).get("users")).entrySet()) {
-            String username = entry.getKey();
-            if (!TopicMatcher.validTopic(username) || username.contains("/")) throw new IOException("Invalid account username");
-            var user = object(entry.getValue());
-            Role role = roles.get(string(user.get("role")));
-            if (role == null) throw new IOException("Account references unknown ACL role");
-            if (!(user.get("iterations") instanceof BigDecimal n) || n.compareTo(BigDecimal.valueOf(ITERATIONS)) != 0)
-                throw new IOException("PBKDF2 iterations must be " + ITERATIONS);
-            try {
-                byte[] salt = Base64.getDecoder().decode(string(user.get("salt")));
-                byte[] hash = Base64.getDecoder().decode(string(user.get("hash")));
-                if (salt.length < 16 || hash.length != 32) throw new IOException("Invalid credential hash or salt length");
-                loaded.put(username, new Account(role, salt, hash));
-            } catch (IllegalArgumentException e) { throw new IOException("Invalid Base64 credential data", e); }
-        }
-        if (loaded.isEmpty()) throw new IOException("No configured users");
-        accounts = Map.copyOf(loaded);
-        acl = Map.copyOf(permissions);
-        dummy = new Account(configuredRole(""), new byte[16], new byte[32]);
-    }
+  public enum ClientIdPolicy {
+    USERNAME_ONLY, USERNAME_OR_UNRESERVED
+  }
 
-    public Optional<Principal> authenticate(String username, byte[] password) {
-        Account user = username == null ? null : accounts.get(username);
-        Account selected = user == null ? dummy : user;
-        char[] chars = null;
-        byte[] actual = null;
-        try {
-            chars = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(CodingErrorAction.REPORT)
-                    .decode(ByteBuffer.wrap(password == null ? new byte[0] : password)).toString().toCharArray();
-            actual = hashPassword(chars, selected.salt);
-            boolean equal = MessageDigest.isEqual(selected.hash, actual);
-            if (user != null && password != null && equal) return Optional.of(new Principal(username, user.role));
-        } catch (GeneralSecurityException | java.nio.charset.CharacterCodingException e) {
-            return Optional.empty();
-        } finally {
-            if (chars != null) Arrays.fill(chars, '\0');
-            if (actual != null) Arrays.fill(actual, (byte) 0);
-        }
-        return Optional.empty();
+  public record Role(String name, ClientIdPolicy clientIdPolicy) {
+    public Role {
+      Objects.requireNonNull(name);
+      Objects.requireNonNull(clientIdPolicy);
     }
+  }
 
-    /**
-     * Account usernames are reserved client IDs. This lets a device keep its identity even while
-     * offline, and prevents a viewer or engine from squatting on a device ID between reconnects.
-     */
-    public boolean canUseClientId(Principal principal, String clientId) {
-        return switch (principal.role().clientIdPolicy()) {
-            case USERNAME_ONLY -> clientId.equals(principal.username());
-            case USERNAME_OR_UNRESERVED -> clientId.equals(principal.username()) || !accounts.containsKey(clientId);
-        };
-    }
+  public record Principal(String username, Role role) {
+  }
 
-    public boolean canPublish(Principal principal, String topic) {
-        Permissions permission = acl.get(principal.role());
-        return permission != null && permission.publish.stream()
-                .anyMatch(filter -> TopicMatcher.match(expand(filter, principal), topic));
-    }
+  private record Account(Role role, byte[] salt, byte[] hash) {
+  }
 
-    public boolean canSubscribe(Principal principal, String requestedFilter) {
-        Permissions permission = acl.get(principal.role());
-        return permission != null && permission.subscribe.stream()
-                .anyMatch(filter -> TopicMatcher.covers(expand(filter, principal), requestedFilter));
-    }
+  private record Permissions(List<String> publish, List<String> subscribe) {
+  }
 
-    public static byte[] hashPassword(char[] password, byte[] salt) throws GeneralSecurityException {
-        var spec = new PBEKeySpec(password, salt, ITERATIONS, 256);
-        try { return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded(); }
-        finally { spec.clearPassword(); }
-    }
+  private final Map<String, Account> accounts;
+  private final Map<Role, Permissions> acl;
+  private final Account dummy;
 
-    private static String expand(String filter, Principal principal) { return filter.replace("${username}", principal.username()); }
-    private static Role configuredRole(String name) {
-        ClientIdPolicy policy = name.equals("device") ? ClientIdPolicy.USERNAME_ONLY
-                : ClientIdPolicy.USERNAME_OR_UNRESERVED;
-        return new Role(name, policy);
+  public AuthService(Path usersPath, Path aclPath) throws IOException {
+    Map<String, Object> policies = object(load(aclPath));
+    var roles = new HashMap<String, Role>();
+    var permissions = new HashMap<Role, Permissions>();
+    for (var entry : policies.entrySet()) {
+      var policy = object(entry.getValue());
+      Role role = configuredRole(entry.getKey());
+      roles.put(entry.getKey(), role);
+      permissions.put(role, new Permissions(filters(policy.get("publish")), filters(policy.get("subscribe"))));
     }
-    private static Object load(Path path) throws IOException {
-        if (Files.size(path) > 1_048_576) throw new IOException("Configuration exceeds 1 MB");
-        return ConfigJson.parse(Files.readString(path));
+    var loaded = new HashMap<String, Account>();
+    for (var entry : object(object(load(usersPath)).get("users")).entrySet()) {
+      String username = entry.getKey();
+      if (!TopicMatcher.validTopic(username) || username.contains("/"))
+        throw new IOException("Invalid account username");
+      var user = object(entry.getValue());
+      Role role = roles.get(string(user.get("role")));
+      if (role == null)
+        throw new IOException("Account references unknown ACL role");
+      if (!(user.get("iterations") instanceof BigDecimal n) || n.compareTo(BigDecimal.valueOf(ITERATIONS)) != 0)
+        throw new IOException("PBKDF2 iterations must be " + ITERATIONS);
+      try {
+        byte[] salt = Base64.getDecoder().decode(string(user.get("salt")));
+        byte[] hash = Base64.getDecoder().decode(string(user.get("hash")));
+        if (salt.length < 16 || hash.length != 32)
+          throw new IOException("Invalid credential hash or salt length");
+        loaded.put(username, new Account(role, salt, hash));
+      } catch (IllegalArgumentException e) {
+        throw new IOException("Invalid Base64 credential data", e);
+      }
     }
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> object(Object value) throws IOException {
-        if (!(value instanceof Map<?, ?>)) throw new IOException("Expected JSON object");
-        return (Map<String, Object>) value;
+    if (loaded.isEmpty())
+      throw new IOException("No configured users");
+    accounts = Map.copyOf(loaded);
+    acl = Map.copyOf(permissions);
+    dummy = new Account(configuredRole(""), new byte[16], new byte[32]);
+  }
+
+  public Optional<Principal> authenticate(String username, byte[] password) {
+    Account user = username == null ? null : accounts.get(username);
+    Account selected = user == null ? dummy : user;
+    char[] chars = null;
+    byte[] actual = null;
+    try {
+      chars = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+          .onUnmappableCharacter(CodingErrorAction.REPORT)
+          .decode(ByteBuffer.wrap(password == null ? new byte[0] : password)).toString().toCharArray();
+      actual = hashPassword(chars, selected.salt);
+      boolean equal = MessageDigest.isEqual(selected.hash, actual);
+      if (user != null && password != null && equal)
+        return Optional.of(new Principal(username, user.role));
+    } catch (GeneralSecurityException | java.nio.charset.CharacterCodingException e) {
+      return Optional.empty();
+    } finally {
+      if (chars != null)
+        Arrays.fill(chars, '\0');
+      if (actual != null)
+        Arrays.fill(actual, (byte) 0);
     }
-    private static String string(Object value) throws IOException {
-        if (!(value instanceof String text)) throw new IOException("Expected JSON string");
-        return text;
+    return Optional.empty();
+  }
+
+  /**
+   * Account usernames are reserved client IDs. This lets a device keep its
+   * identity even while
+   * offline, and prevents a viewer or engine from squatting on a device ID
+   * between reconnects.
+   */
+  public boolean canUseClientId(Principal principal, String clientId) {
+    return switch (principal.role().clientIdPolicy()) {
+      case USERNAME_ONLY -> clientId.equals(principal.username());
+      case USERNAME_OR_UNRESERVED -> clientId.equals(principal.username()) || !accounts.containsKey(clientId);
+    };
+  }
+
+  public boolean canPublish(Principal principal, String topic) {
+    Permissions permission = acl.get(principal.role());
+    return permission != null && permission.publish.stream()
+        .anyMatch(filter -> TopicMatcher.match(expand(filter, principal), topic));
+  }
+
+  public boolean canSubscribe(Principal principal, String requestedFilter) {
+    Permissions permission = acl.get(principal.role());
+    return permission != null && permission.subscribe.stream()
+        .anyMatch(filter -> TopicMatcher.covers(expand(filter, principal), requestedFilter));
+  }
+
+  public static byte[] hashPassword(char[] password, byte[] salt) throws GeneralSecurityException {
+    var spec = new PBEKeySpec(password, salt, ITERATIONS, 256);
+    try {
+      return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
+    } finally {
+      spec.clearPassword();
     }
-    private static List<String> filters(Object value) throws IOException {
-        if (!(value instanceof List<?> list)) throw new IOException("Expected ACL filter array");
-        var filters = new ArrayList<String>();
-        for (Object item : list) {
-            String filter = string(item);
-            if (!TopicMatcher.validFilter(filter.replace("${username}", "device"))) throw new IOException("Invalid ACL filter");
-            filters.add(filter);
-        }
-        return List.copyOf(filters);
+  }
+
+  private static String expand(String filter, Principal principal) {
+    return filter.replace("${username}", principal.username());
+  }
+
+  private static Role configuredRole(String name) {
+    ClientIdPolicy policy = name.equals("device") ? ClientIdPolicy.USERNAME_ONLY
+        : ClientIdPolicy.USERNAME_OR_UNRESERVED;
+    return new Role(name, policy);
+  }
+
+  private static Object load(Path path) throws IOException {
+    if (Files.size(path) > 1_048_576)
+      throw new IOException("Configuration exceeds 1 MB");
+    return ConfigJson.parse(Files.readString(path));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> object(Object value) throws IOException {
+    if (!(value instanceof Map<?, ?>))
+      throw new IOException("Expected JSON object");
+    return (Map<String, Object>) value;
+  }
+
+  private static String string(Object value) throws IOException {
+    if (!(value instanceof String text))
+      throw new IOException("Expected JSON string");
+    return text;
+  }
+
+  private static List<String> filters(Object value) throws IOException {
+    if (!(value instanceof List<?> list))
+      throw new IOException("Expected ACL filter array");
+    var filters = new ArrayList<String>();
+    for (Object item : list) {
+      String filter = string(item);
+      if (!TopicMatcher.validFilter(filter.replace("${username}", "device")))
+        throw new IOException("Invalid ACL filter");
+      filters.add(filter);
     }
+    return List.copyOf(filters);
+  }
 }

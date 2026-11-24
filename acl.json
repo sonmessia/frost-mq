@@ -1,6 +1,9 @@
 {
   "device": {
-    "publish": ["coldchain/+/${username}/telemetry", "coldchain/+/${username}/status"],
+    "publish": [
+      "coldchain/+/${username}/telemetry",
+      "coldchain/+/${username}/status"
+    ],
     "subscribe": ["coldchain/+/${username}/cmd"]
   },
   "engine": {

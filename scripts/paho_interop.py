@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent MQTT 3.1.1 interoperability check. Requires paho-mqtt==2.1.0."""
+
 import os
 from pathlib import Path
 import queue
@@ -20,18 +21,25 @@ class Peer:
         self.messages = queue.Queue()
         self.connected = threading.Event()
         self.connect_code = None
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                  client_id=client_id or str(uuid.uuid4()),
-                                  clean_session=True, protocol=mqtt.MQTTv311)
+        self.client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=client_id or str(uuid.uuid4()),
+            clean_session=True,
+            protocol=mqtt.MQTTv311,
+        )
         self.client.username_pw_set(username, password)
         if will:
             self.client.will_set(will, b"offline", qos=1, retain=True)
         self.client.on_connect = self.on_connect
         self.client.on_message = lambda client, userdata, message: self.messages.put(
-            (message.topic, message.payload, message.qos, message.retain))
+            (message.topic, message.payload, message.qos, message.retain)
+        )
         self.subscriptions = queue.Queue()
-        self.client.on_subscribe = lambda client, userdata, mid, codes, properties: self.subscriptions.put(
-            [code.value for code in codes])
+        self.client.on_subscribe = (
+            lambda client, userdata, mid, codes, properties: self.subscriptions.put(
+                [code.value for code in codes]
+            )
+        )
         self.client.reconnect_delay_set(30, 30)
         self.client.connect("127.0.0.1", port, keepalive=2)
         self.client.loop_start()
@@ -56,10 +64,23 @@ class Peer:
 
 
 def main():
-    jar = ROOT / "mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar"
+    jar = (
+        ROOT / "mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar"
+    )
     process = subprocess.Popen(
-        ["java", "-jar", str(jar), "0", str(ROOT / "users.json"), str(ROOT / "acl.json")],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        [
+            "java",
+            "-jar",
+            str(jar),
+            "0",
+            str(ROOT / "users.json"),
+            str(ROOT / "acl.json"),
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     peers = []
     try:
         with selectors.DefaultSelector() as selector:
@@ -80,7 +101,9 @@ def main():
         device = peer("sensor01", client_id="sensor01")
         assert device.connect_code == 0
         takeover = peer("viewer", client_id="sensor01")
-        assert takeover.connect_code == 133  # Another account cannot take the device ID.
+        assert (
+            takeover.connect_code == 133
+        )  # Another account cannot take the device ID.
         assert device.subscribe("coldchain/+/sensor01/cmd", qos=2) == [1]
         assert device.subscribe("coldchain/+/+/cmd") == [128]
         assert device.subscribe("coldchain/#") == [128]
@@ -108,12 +131,18 @@ def main():
         assert device.messages.get(timeout=3)[1] == b'{"power":"on"}'
         assert viewer.messages.get(timeout=3)[0].endswith("/cmd")
         denied = peer("viewer", password="incorrect")
-        assert denied.connect_code == 134  # Paho maps MQTT 3.1.1 code 4 to MQTT 5 reason 134.
+        assert (
+            denied.connect_code == 134
+        )  # Paho maps MQTT 3.1.1 code 4 to MQTT 5 reason 134.
         mismatch = peer("sensor02", client_id="wrong-id")
         assert mismatch.connect_code == 133
-        print("PASS: Paho MQTT 3.1.1 auth, ACL containment, QoS 0/1, QoS 2 subscription downgrade, retained replay/deletion, and commands")
+        print(
+            "PASS: Paho MQTT 3.1.1 auth, ACL containment, QoS 0/1, QoS 2 subscription downgrade, retained replay/deletion, and commands"
+        )
         time.sleep(3)  # Exercise Paho's keep-alive, beyond the broker's 1.5x deadline.
-        engine.publish("coldchain/alerts/WARNING", b'{"rule":"interop","device":"sensor01","ts":1}')
+        engine.publish(
+            "coldchain/alerts/WARNING", b'{"rule":"interop","device":"sensor01","ts":1}'
+        )
         assert viewer.messages.get(timeout=3)[0] == "coldchain/alerts/WARNING"
         print("PASS: Paho keep-alive")
     finally:

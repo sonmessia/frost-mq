@@ -1,146 +1,335 @@
 # FrostMQ
 
-A Java 25 MQTT 3.1.1 subset broker, blocking client, and cold-chain monitoring demo, built from `frostmq_architecture_spec_for_ai_generators.md`.
+FrostMQ is a Java 25 implementation of a focused MQTT 3.1.1 broker and blocking client. The repository also includes a cold-chain demo with simulated sensors, an alerting rule engine, and a JavaFX dashboard.
 
-## Build
+This project is intended for local development, protocol experiments, and demonstrations. It is not a production MQTT broker.
 
-Install JDK 25 and Maven 3.9+. Run commands from this directory:
+## Repository modules
+
+| Module | Purpose |
+| --- | --- |
+| `mqtt-common` | MQTT packets, codec, topic validation, TLS helpers |
+| `mqtt-broker` | In-memory MQTT broker, authentication, ACLs, quotas |
+| `mqtt-client` | Blocking client and automatic reconnect supervision |
+| `demo-apps` | Cold-chain rule engine and device simulator |
+| `dashboard` | JavaFX fleet and alert dashboard |
+
+## Requirements
+
+- JDK 25
+- Maven 3.9 or newer
+- A graphical desktop only when running the JavaFX dashboard
+- Python 3 only for the optional validation scripts
+
+Confirm that the correct tools are active:
 
 ```sh
-mvn -B install
+java --version
+mvn --version
 ```
 
-This compiles all five modules, runs JUnit 5 tests, and installs the artifacts needed by the Maven launch commands below. The broker, common protocol, and client have no third-party runtime dependencies. JUnit is test-only. The applications use Gson 2.11.0; the dashboard also uses OpenJFX 25.
+All commands below must be run from the repository root.
 
-## Run the cold-chain demo
+## Quick start
 
-Open four terminals in this directory. Start the broker first, then the rule engine, simulator, and dashboard:
+### 1. Build the project
 
 ```sh
-# Terminal 1
+mvn -B clean install
+```
+
+This compiles all modules, runs the JUnit suite, installs the local artifacts required by the Maven launch commands, and creates the executable broker JAR:
+
+```text
+mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar
+```
+
+### 2. Start the complete demo
+
+Open four terminals in the repository root. Start the processes in the following order.
+
+**Terminal 1 — broker**
+
+```sh
 java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar
 ```
 
-```sh
-# Terminal 2
-mvn -pl demo-apps exec:java -Dexec.mainClass=io.frostmq.demo.RuleEngine
+Expected output:
+
+```text
+FrostMQ listening on 127.0.0.1:1883
 ```
 
+**Terminal 2 — rule engine**
+
 ```sh
-# Terminal 3
-mvn -pl demo-apps exec:java -Dexec.mainClass=io.frostmq.demo.DeviceSimulator \
+mvn -pl demo-apps exec:java \
+  -Dexec.mainClass=io.frostmq.demo.RuleEngine
+```
+
+**Terminal 3 — simulated devices**
+
+```sh
+mvn -pl demo-apps exec:java \
+  -Dexec.mainClass=io.frostmq.demo.DeviceSimulator \
   -Dexec.args="--nodes 5 --fault sensor01 --fault-after-seconds 6"
 ```
 
+**Terminal 4 — JavaFX dashboard**
+
 ```sh
-# Terminal 4, requires a graphical desktop
 mvn -pl dashboard javafx:run
 ```
 
-The simulator publishes every two seconds. `sensor01` and `sensor02` each include a cooling actuator listening to their own command topic. The fault raises `sensor01` to 9.5 °C. The engine emits a `CRITICAL` alert above 8 °C, turns cooling on, and emits `RESOLVED` with cooling off below 6 °C. The dashboard has device-fleet and alert-stream screens. Alerts also append to `alerts.csv`.
+The dashboard requires a graphical desktop. For a headless demo, run only the first three processes and use the Mosquitto subscriber shown in [Use external MQTT tools](#use-external-mqtt-tools).
 
-Ctrl+C stops an application. On normal simulator shutdown, nodes explicitly publish retained `offline` status and disconnect. On an unexpected socket loss or missed keep-alive, the broker publishes their Last Will. Reconnecting with the same account's client ID disconnects the old session without its Will. A client ID owned by another account is rejected with CONNACK code 2, so a viewer cannot take over a sensor session. Account usernames stay reserved as client IDs even while that account is offline.
+### 3. Observe the demo
 
-### Options
+- Sensors publish retained telemetry every two seconds.
+- `sensor01` and `sensor02` have simulated cooling actuators.
+- After six seconds, the example command raises `sensor01` to 9.5 °C.
+- The rule engine emits a `CRITICAL` alert above 8 °C and turns cooling on.
+- When the temperature drops below 6 °C, it emits `RESOLVED` and turns cooling off.
+- The dashboard shows the current device fleet and alert stream.
+- Alerts are appended to `alerts.csv` in the repository root.
 
-The broker accepts positional arguments:
+Press `Ctrl+C` in each terminal to stop the applications. Stop the broker last if you want devices to publish their final retained `offline` status cleanly.
+
+## Demo configuration
+
+### Broker arguments
+
+The broker accepts positional arguments in this order:
+
+```sh
+java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
+  [port] [users-file] [acl-file] [bind-host]
+```
+
+Example:
 
 ```sh
 java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
   1883 users.json acl.json 127.0.0.1
 ```
 
-The default bind address is loopback. Port `0` selects an ephemeral port for testing. TLS is optional via environment variables (below); never expose the plaintext default to an untrusted network.
+| Position | Default | Description |
+| --- | --- | --- |
+| `port` | `1883` | MQTT listener port; `0` selects an ephemeral test port |
+| `users-file` | `users.json` | Account and password-hash configuration |
+| `acl-file` | `acl.json` | Publish and subscribe ACL configuration |
+| `bind-host` | `127.0.0.1` | Listener address |
 
-Simulator options use `--name value`: `--host`, `--port`, `--site`, `--nodes`, `--fault`, `--fault-after-seconds`, and `--duration-seconds`. Defaults are `127.0.0.1`, `1883`, `warehouse-a`, five nodes, no fault, six seconds before an enabled fault, and unlimited duration.
+The default listener is plaintext and bound to loopback. Do not expose it to an untrusted network. Use TLS before changing the bind address to a remotely reachable interface.
 
-The engine accepts `--host`, `--port`, `--alerts`, and `--duration-seconds` (zero means unlimited). The dashboard accepts JavaFX named arguments, using `--name=value`:
+### Rule engine options
+
+Rule engine options use `--name value` syntax.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | Broker host |
+| `--port` | `1883` | Broker port |
+| `--alerts` | `alerts.csv` | CSV alert output path |
+| `--duration-seconds` | `0` | Runtime; `0` means unlimited |
+
+Example:
 
 ```sh
-mvn -pl dashboard javafx:run -Djavafx.args="--host=127.0.0.1 --port=1883"
+mvn -pl demo-apps exec:java \
+  -Dexec.mainClass=io.frostmq.demo.RuleEngine \
+  -Dexec.args="--host 127.0.0.1 --port 1883 --alerts alerts.csv --duration-seconds 60"
 ```
 
-All applications read `FROSTMQ_PASSWORD`, falling back to the public demo password below. The dashboard uses `viewer` unless `--username=...` is supplied. The dashboard, rule engine, and simulated devices reconnect automatically with exponential backoff and replay their subscriptions; the dashboard's Retry button bypasses the current delay. Devices also republish their application state after reconnect. There is no durable application queue, so messages published while a client is offline are lost.
+### Device simulator options
 
-### TLS
+Simulator options also use `--name value` syntax.
 
-The broker and client remain plaintext by default. To enable server-authenticated TLS, create a PKCS12 server keystore and a truststore containing its certificate:
+| Option | Default | Description |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | Broker host |
+| `--port` | `1883` | Broker port |
+| `--site` | `warehouse-a` | Site topic level |
+| `--nodes` | `5` | Number of simulated sensors |
+| `--fault` | empty | Device that receives a temperature fault |
+| `--fault-after-seconds` | `6` | Delay before fault injection |
+| `--duration-seconds` | `0` | Runtime; `0` means unlimited |
+
+The included credentials provision `sensor01` through `sensor10`. Add more sensor accounts before using `--nodes` with a value greater than 10.
+
+### Dashboard options
+
+JavaFX named arguments use `--name=value` syntax:
+
+```sh
+mvn -pl dashboard javafx:run \
+  -Djavafx.args="--host=127.0.0.1 --port=1883 --username=viewer"
+```
+
+Supported arguments are `--host`, `--port`, `--username`, and `--client-id`. The defaults are `127.0.0.1`, `1883`, `viewer`, and a generated dashboard client ID.
+
+### Environment variables
+
+| Variable | Used by | Default |
+| --- | --- | --- |
+| `FROSTMQ_PASSWORD` | Rule engine, simulator, dashboard, credential tool | `frostmq-demo` for demo applications |
+| `FROSTMQ_TLS_KEYSTORE` | Broker | TLS disabled |
+| `FROSTMQ_TLS_KEYSTORE_PASSWORD` | Broker | Required when a keystore is configured |
+| `FROSTMQ_TLS_TRUSTSTORE` | Clients and applications | TLS disabled |
+| `FROSTMQ_TLS_TRUSTSTORE_PASSWORD` | Clients and applications | Required when a truststore is configured |
+| `FROSTMQ_MAX_CONNECTIONS` | Broker | `1024` |
+| `FROSTMQ_MAX_FILTERS_PER_SESSION` | Broker | `100` |
+| `FROSTMQ_MAX_FILTERS` | Broker | `10000` |
+| `FROSTMQ_MAX_RETAINED` | Broker | `10000` |
+
+The rule engine, simulator, and dashboard reconnect automatically with capped exponential backoff. They recreate their clean sessions and subscriptions after reconnect. The dashboard's **Retry now** button bypasses the current delay. Messages published while an application is offline are not queued for later delivery.
+
+## Enable TLS
+
+FrostMQ supports optional server-authenticated TLS with PKCS12 stores. Mutual TLS is not implemented.
+
+### 1. Create development key material
+
+`keytool` is included with the JDK:
 
 ```sh
 keytool -genkeypair -alias frostmq -keyalg RSA -keysize 2048 -validity 365 \
   -storetype PKCS12 -keystore server.p12 -storepass changeit \
   -dname "CN=localhost" -ext "SAN=IP:127.0.0.1,dns:localhost" -noprompt
-keytool -exportcert -alias frostmq -keystore server.p12 -storepass changeit -file server.crt
+
+keytool -exportcert -alias frostmq -keystore server.p12 \
+  -storepass changeit -file server.crt
+
 keytool -importcert -noprompt -alias frostmq -file server.crt \
   -keystore trust.p12 -storetype PKCS12 -storepass changeit
 ```
 
-Start the broker with its keystore, then start the applications with the truststore:
+These passwords are examples only. Use protected secrets and appropriately managed certificates outside local development.
+
+### 2. Start the TLS broker
 
 ```sh
-FROSTMQ_TLS_KEYSTORE=server.p12 FROSTMQ_TLS_KEYSTORE_PASSWORD=changeit \
-  java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar
-
-FROSTMQ_TLS_TRUSTSTORE=trust.p12 FROSTMQ_TLS_TRUSTSTORE_PASSWORD=changeit \
-  mvn -pl demo-apps exec:java -Dexec.mainClass=io.frostmq.demo.RuleEngine
+FROSTMQ_TLS_KEYSTORE=server.p12 \
+FROSTMQ_TLS_KEYSTORE_PASSWORD=changeit \
+java -jar mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar
 ```
 
-The client verifies the broker hostname against the certificate SAN using HTTPS endpoint identification. A CN-only certificate is rejected: a DNS connection requires a DNS SAN and an IP-literal connection requires an IP SAN. Keep the SAN aligned with `--host`/`FROSTMQ_TLS_*`; for example, use `SAN=IP:127.0.0.1` when connecting to `127.0.0.1`. TLS is server-authenticated only: there are no client certificates, so MQTT usernames and passwords still need to be strong. Without the keystore/truststore variables, the demo stays plaintext on loopback.
+Expected output includes `(TLS)`:
+
+```text
+FrostMQ listening on 127.0.0.1:1883 (TLS)
+```
+
+### 3. Configure every client process
+
+Set the truststore variables in each terminal that runs the rule engine, simulator, or dashboard:
+
+```sh
+export FROSTMQ_TLS_TRUSTSTORE="$PWD/trust.p12"
+export FROSTMQ_TLS_TRUSTSTORE_PASSWORD=changeit
+```
+
+Then use the same launch commands from the quick-start section.
+
+The requested host must match the certificate Subject Alternative Name (SAN):
+
+- Connecting to `127.0.0.1` requires `SAN=IP:127.0.0.1`.
+- Connecting to `localhost` requires `SAN=dns:localhost`.
+- A certificate containing only a Common Name is rejected.
+- An untrusted certificate or a SAN mismatch causes the connection to fail.
 
 ## Credentials and ACLs
 
-`users.json` contains public demonstration accounts: `sensor01` through `sensor10`, `engine`, and `viewer`. Their demo password is `frostmq-demo`. These are not production credentials. Change them before using real data.
+The tracked `users.json` file contains demonstration accounts:
 
-Passwords are stored as Base64 PBKDF2-HMAC-SHA256 hashes with 210,000 iterations, 16-byte per-account salts, and 256-bit derived keys. Authentication uses constant-time hash comparison. `acl.json` is the policy from the blueprint. Device usernames must equal client IDs; subscription authorization checks containment of the requested filter, not just a match against its text. A live client ID can only be replaced by a session authenticated as the same account, and account usernames are reserved so another account cannot claim a device ID while it is offline. Wills must also be authorized.
+| Accounts | Role | Demo password |
+| --- | --- | --- |
+| `sensor01` through `sensor10` | `device` | `frostmq-demo` |
+| `engine` | `engine` | `frostmq-demo` |
+| `viewer` | `viewer` | `frostmq-demo` |
 
-Add an account or replace its password using the JDK-only credential utility. It reads a hidden console prompt when possible, or `FROSTMQ_PASSWORD` when set:
+These credentials are public and must not be used with real data.
+
+Device usernames and client IDs must be identical. Account usernames are reserved client IDs, including while an account is offline. A live client ID may only be replaced by another session authenticated as the same account; a cross-account takeover is rejected with CONNACK code 2.
+
+Add an account or replace its password with the credential utility:
 
 ```sh
 java -cp mqtt-broker/target/mqtt-broker-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
   io.frostmq.broker.CredentialsTool users.json sensor11 device
 ```
 
-The tool generates a random salt and atomically replaces the credentials file, with owner-only permissions on POSIX systems. Restart the broker to reload users or ACLs. Provision additional sensor accounts before running more than ten simulated nodes.
+The utility reads a hidden console prompt when available. If `FROSTMQ_PASSWORD` is set, it uses that value instead. It generates a random salt, writes PBKDF2-HMAC-SHA256 credentials atomically, and applies owner-only permissions on POSIX systems.
 
-## Client API
+Restart the broker after changing `users.json` or `acl.json`.
+
+## Use external MQTT tools
+
+With Mosquitto clients installed, subscribe as the read-only viewer:
+
+```sh
+mosquitto_sub -h 127.0.0.1 -p 1883 -V mqttv311 \
+  -u viewer -P frostmq-demo -t 'coldchain/#' -q 1 -v
+```
+
+Publish telemetry as `sensor10`:
+
+```sh
+mosquitto_pub -h 127.0.0.1 -p 1883 -V mqttv311 \
+  -i sensor10 -u sensor10 -P frostmq-demo \
+  -t coldchain/warehouse-a/sensor10/telemetry -q 1 \
+  -m '{"temp":9.1,"hum":78.5,"door":0,"ts":1764000000123}'
+```
+
+Do not reuse a sensor client ID while that sensor is running unless you intend to replace its existing same-account session.
+
+## Client usage
 
 ```java
 try (MqttClient client = new BlockingMqttClient()) {
-    client.connect(new ConnectOptions("127.0.0.1", 1883, "my-viewer", "viewer", password));
-    int granted = client.subscribe("coldchain/#", 1, (topic, payload, qos, retained) -> {
-        // Reader virtual thread: hand off slow work to your own worker.
-    });
-    // granted is 0, 1, or 128 (ACL denial).
+    client.connect(new ConnectOptions(
+            "127.0.0.1", 1883, "my-viewer", "viewer", "frostmq-demo"));
+
+    int grantedQos = client.subscribe("coldchain/#", 1,
+            (topic, payload, qos, retained) -> {
+                // This callback runs on the reader virtual thread.
+                // Hand slow or blocking work to another executor.
+            });
+
+    if (grantedQos == 128) {
+        throw new IllegalStateException("Subscription denied by the broker ACL");
+    }
 }
 ```
 
-Classes are under `io.frostmq.client`; packet classes are under `io.frostmq.common`. `connect()` has one absolute ten-second deadline shared by TCP, TLS, and CONNACK; QoS 1 publish, subscribe, and unsubscribe wait up to five seconds. A timeout closes the connection and fails pending requests. The client sends keep-alive pings automatically. `BlockingMqttClient` reconnect is explicit and starts a fresh clean session; `ReconnectingMqttSession` adds capped backoff, restoration callbacks, initial-connect recovery, and manual retry-now support.
+`BlockingMqttClient.connect()` has one absolute 10-second deadline shared by TCP, TLS, and CONNACK. QoS 1 publish, subscribe, and unsubscribe operations wait up to five seconds. Blocking MQTT operations invoked from a message callback fail fast rather than deadlock.
 
-Callbacks run on the client reader virtual thread. Blocking QoS 1 publishes, subscriptions, and unsubscriptions from that thread fail fast rather than deadlock. The rule engine uses a separate virtual-thread worker; dashboard updates pass through `Platform.runLater`.
+For long-running applications, `ReconnectingMqttSession` adds initial-connect recovery, capped backoff, session-restoration callbacks, and manual retry support around an `MqttClient`.
 
-## Protocol and limits
+## Supported protocol and limits
 
-- CONNECT must be the first packet and complete within ten seconds. Only protocol name `MQTT`, level 4, and Clean Session 1 are accepted. Empty non-device client IDs receive generated UUIDs. Device IDs must equal the authenticated device username; other accounts cannot use any account username as their client ID.
-- QoS 0 and 1, retained messages, Last Wills, wildcard subscriptions, unsubscribe, and heartbeat packets are supported. QoS 2 PUBLISH and QoS 2 handshake packets close the connection; QoS 2 subscription requests are downgraded to 1.
-- Remaining Length is capped at 262,144 bytes, including the variable header and payload, matching the blueprint's decoder. Malformed UTF-8, invalid fixed flags, zero packet identifiers, malformed topics, and truncated frames are rejected.
-- Each connection has one reader and one writer virtual thread. Publishers use nonblocking queue offers rather than writing subscriber sockets. Each outbound queue holds 1,000 packets: overflowing QoS 0 is dropped and counted by `outboundDropCount()`; overflowing QoS 1 closes the subscriber. Connection-quota rejections are counted separately by `rejectedConnectionCount()`.
-- QoS 1 deliveries use per-session identifiers, tracked acknowledgements, and five-second duplicate retries. Unacknowledged deliveries are also capped at 1,000 to bound memory.
-- Keep-alive expiry is checked every 100 ms against the 1.5× deadline. Keep-alive zero disables it after CONNECT.
-- Unauthorized PUBLISH messages are dropped and logged; the sixth consecutive violation closes the socket. An authorized publish resets the counter. Unauthorized subscriptions receive SUBACK `0x80`.
-- Connections above the connection quota are closed on accept. Subscriptions above the per-session or total filter quota receive SUBACK `0x80`. New retained topics above quota are not stored; replacing or deleting an existing retained topic is still allowed.
-- Re-subscribing the same filter replaces its granted QoS. Distinct overlapping subscriptions are coalesced to one delivery at their highest granted QoS. Live deliveries have RETAIN false; retained subscription replay has RETAIN true. An empty retained payload deletes the stored value.
+- MQTT 3.1.1 (`MQTT`, protocol level 4), Clean Session only
+- QoS 0 and QoS 1 publish and delivery
+- QoS 2 subscription requests downgraded to QoS 1; QoS 2 publish is unsupported
+- Retained messages and retained deletion with an empty payload
+- Last Wills, keep-alive, wildcard subscriptions, and unsubscribe
+- Exact, `+`, and `#` subscription trie matching, including MQTT `$SYS` isolation
+- Maximum packet Remaining Length: 262,144 bytes
+- Outbound queue per connection: 1,000 packets
+- Unacknowledged QoS 1 deliveries per connection: 1,000
+- Five-second QoS 1 duplicate retry interval
 
-This is an in-memory subset, not a production broker: no persistent sessions, QoS 2, WebSockets, clustering, or retained-store disk persistence. TLS is available as an optional server-authenticated transport, not as mutual TLS. The subscription index is a read/write-locked topic-filter trie with exact, `+`, and `#` branches. Connections, subscription filters per session, total filters, and retained topics are capped at 1,024, 100, 10,000, and 10,000 by default. Override them with `FROSTMQ_MAX_CONNECTIONS`, `FROSTMQ_MAX_FILTERS_PER_SESSION`, `FROSTMQ_MAX_FILTERS`, and `FROSTMQ_MAX_RETAINED`. The engine's worker queue holds 10,000 events and logs overflow; every untrusted text or numeric CSV cell is neutralized per OWASP CSV-injection guidance. `ReconnectingMqttSession` centralizes capped exponential backoff and restoration for the engine, simulated devices, and dashboard. The engine retries transient QoS 1 alert publishes, including when the broker is unavailable at startup. Devices restore actuator subscriptions, preserve local temperature/cooling state, and republish retained online status and telemetry. The dashboard restores its viewer subscription while preserving the projected UI model. Events published while an application is offline are not replayed by the broker.
+The broker is in-memory only. It does not provide persistent sessions, retained-message disk persistence, WebSockets, clustering, QoS 2 delivery, or durable application queues.
 
-## Tests
+## Verification
+
+Run the complete Maven test suite:
 
 ```sh
 mvn -B verify
 ```
 
-Tests cover wire-length boundaries (127, 128, 16,383, 16,384, and the packet cap), fragmented reads, malformed frames, wildcard and `$SYS` rules, PBKDF2/ACLs, client-ID isolation, protocol edge cases, queue and in-flight exhaustion, connection/subscription/retained quotas, deterministic broker shutdown/restart, one-deadline TLS/CONNECT timing, TLS round-trips plus untrusted-certificate, missing-SAN, and hostname failures, QoS replacement/coalescing, QoS 1 retries, concurrent publishes, client timeouts, CSV-injection handling including negative telemetry, initial and post-connect recovery, and the simulator-to-engine cooling/recovery path. Dashboard model tests cover device and alert projections.
-
-For an independent standard-client check:
+Run the independent Paho MQTT 3.1.1 interoperability check:
 
 ```sh
 python3 -m venv .venv
@@ -148,25 +337,24 @@ python3 -m venv .venv
 .venv/bin/python scripts/paho_interop.py
 ```
 
-The script starts its own loopback broker on an ephemeral port and checks Paho MQTT 3.1.1 authentication, ACLs, QoS 0/1, retained replay/deletion, commands, and keep-alive.
-
-To test the real application launch commands and both JavaFX screens on a graphical desktop:
+Run the real-process and JavaFX smoke test on a graphical desktop:
 
 ```sh
 python3 scripts/demo_smoke.py
 ```
 
-This starts an isolated broker, engine, and two-node simulator, runs the opt-in JavaFX test, checks CSV alerts, and saves fleet/alert screenshots under `artifacts/`. The normal Maven suite skips this GUI test so headless builds still work.
+The smoke test writes logs, CSV output, and dashboard screenshots under `artifacts/`. The regular Maven build skips the graphical UI test so that headless builds remain supported.
 
-If Mosquitto tools are installed, these commands work against the running broker:
+## Troubleshooting
 
-```sh
-mosquitto_sub -h 127.0.0.1 -p 1883 -V mqttv311 \
-  -u viewer -P frostmq-demo -t 'coldchain/#' -q 1 -v
-mosquitto_pub -h 127.0.0.1 -p 1883 -V mqttv311 \
-  -i sensor01 -u sensor01 -P frostmq-demo \
-  -t coldchain/warehouse-a/sensor01/telemetry -q 1 \
-  -m '{"temp":9.1,"hum":78.5,"door":0,"ts":1764000000123}'
-```
-
-Do not run the publisher while the simulator's `sensor01` is connected unless you intend to replace that session.
+| Symptom | Resolution |
+| --- | --- |
+| Broker JAR is missing | Run `mvn -B clean install` from the repository root |
+| `release version 25 not supported` | Point `JAVA_HOME` and `PATH` to JDK 25 |
+| `Connection refused` | Start the broker and verify that all processes use the same host and port |
+| `Address already in use` | Stop the existing broker or choose another port for every process |
+| CONNECT is rejected with code 2 | Use an unreserved client ID, or authenticate as the account that owns that ID |
+| TLS handshake fails | Verify the truststore, password, requested host, and certificate SAN |
+| Dashboard cannot open a display | Run it on a graphical desktop with a valid display session, or use headless mode |
+| Nodes above `sensor10` cannot connect | Provision matching accounts with `CredentialsTool` before increasing `--nodes` |
+| Alerts are not visible | Start the rule engine and simulator, then verify `alerts.csv` and the broker logs |
