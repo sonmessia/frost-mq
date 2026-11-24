@@ -5,7 +5,6 @@ import io.frostmq.broker.*;
 import io.frostmq.client.*;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
-import java.net.BindException;
 import java.nio.file.*;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
@@ -50,7 +49,7 @@ class ColdChainIntegrationTest {
             engine.start();
             first.close();
             try (var second = new BrokerServer(port, auth)) {
-                startWithRetry(second);
+                second.start();
                 try (var device = new BlockingMqttClient()) {
                     device.connect(new ConnectOptions("127.0.0.1", port, "sensor01", "sensor01", "frostmq-demo"));
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
@@ -95,17 +94,4 @@ class ColdChainIntegrationTest {
         }
     }
 
-    /** A just-closed listener can take a moment to release its port before a same-port restart. */
-    private static void startWithRetry(BrokerServer broker) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (true) {
-            try {
-                broker.start();
-                return;
-            } catch (BindException e) {
-                if (System.nanoTime() >= deadline) throw e;
-                Thread.sleep(50);
-            }
-        }
-    }
 }

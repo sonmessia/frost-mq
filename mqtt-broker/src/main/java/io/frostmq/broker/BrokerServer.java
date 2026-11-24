@@ -25,7 +25,9 @@ public final class BrokerServer implements AutoCloseable {
     private final ScheduledExecutorService maintenance = Executors.newSingleThreadScheduledExecutor(
             task -> Thread.ofPlatform().daemon().name("frostmq-maintenance").unstarted(task));
     private final LongAdder dropped = new LongAdder();
+    private final CountDownLatch closeComplete = new CountDownLatch(1);
     private volatile ServerSocket serverSocket;
+    private volatile Thread acceptor;
     private volatile boolean running;
     private boolean closed;
 
@@ -61,7 +63,7 @@ public final class BrokerServer implements AutoCloseable {
         } catch (IOException e) { socket.close(); throw e; }
         serverSocket = socket;
         running = true;
-        workers.submit(this::acceptLoop);
+        acceptor = Thread.ofPlatform().daemon().name("frostmq-acceptor").start(this::acceptLoop);
         maintenance.scheduleAtFixedRate(() -> {
             long now = System.nanoTime();
             connections.forEach(session -> session.maintain(now));
@@ -82,11 +84,16 @@ public final class BrokerServer implements AutoCloseable {
                 var session = new ClientSession(this, socket);
                 connections.add(session);
                 if (!running) { session.closeSession("Broker stopping", true); continue; }
-                workers.submit(session::writeLoop);
-                workers.submit(new ConnectionHandler(session));
+                try {
+                    workers.submit(session::writeLoop);
+                    workers.submit(new ConnectionHandler(session));
+                } catch (RejectedExecutionException e) {
+                    session.closeSession("Broker stopping", true);
+                    return;
+                }
             } catch (IOException e) {
                 if (running) System.getLogger(getClass().getName()).log(System.Logger.Level.ERROR, "Accept failed", e);
-            } catch (RejectedExecutionException ignored) { return; }
+            }
         }
     }
 
@@ -128,14 +135,47 @@ public final class BrokerServer implements AutoCloseable {
     public long droppedCount() { return dropped.sum(); }
     void recordDrop() { dropped.increment(); }
 
-    @Override public synchronized void close() {
-        if (closed) return;
-        closed = true;
-        running = false;
-        if (serverSocket != null) try { serverSocket.close(); } catch (IOException ignored) {}
-        connections.forEach(session -> session.closeSession("Broker shutdown", true));
-        maintenance.shutdownNow();
-        workers.shutdownNow();
+    @Override public void close() {
+        boolean initiate;
+        synchronized (this) {
+            initiate = !closed;
+            if (initiate) {
+                closed = true;
+                running = false;
+            }
+        }
+        if (!initiate) { awaitCloseComplete(); return; }
+        try {
+            if (serverSocket != null) try { serverSocket.close(); } catch (IOException ignored) {}
+            join(acceptor, "acceptor");
+            maintenance.shutdownNow();
+            awaitTermination(maintenance, "maintenance");
+            connections.forEach(session -> session.closeSession("Broker shutdown", true));
+            workers.shutdownNow();
+            awaitTermination(workers, "workers");
+        } finally {
+            closeComplete.countDown();
+        }
+    }
+
+    private void awaitCloseComplete() {
+        try { closeComplete.await(); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    private static void join(Thread thread, String name) {
+        if (thread == null || thread == Thread.currentThread()) return;
+        try {
+            thread.join(5_000);
+            if (thread.isAlive()) LOG.log(System.Logger.Level.WARNING, "Broker {0} thread did not stop", name);
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    private static void awaitTermination(ExecutorService executor, String name) {
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS))
+                LOG.log(System.Logger.Level.WARNING, "Broker {0} executor did not stop", name);
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     public static void main(String[] args) throws Exception {
