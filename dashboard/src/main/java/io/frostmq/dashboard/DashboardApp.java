@@ -14,15 +14,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.*;
 import java.util.function.Function;
 
 public final class DashboardApp extends Application {
   private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss")
       .withZone(ZoneId.systemDefault());
   private final DashboardModel model = new DashboardModel();
-  private final BlockingMqttClient client = new BlockingMqttClient();
-  private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
   private final ObservableList<DashboardModel.Device> devices = FXCollections.observableArrayList();
   private final ObservableList<DashboardModel.Alert> alerts = FXCollections.observableArrayList();
   private final Label connection = new Label("Disconnected");
@@ -34,6 +31,7 @@ public final class DashboardApp extends Application {
   private final Button reconnect = new Button("Connect");
   private final BorderPane content = new BorderPane();
   private volatile boolean closing;
+  private volatile DashboardFeed feed;
   private Node deviceScreen;
   private Node alertScreen;
 
@@ -53,7 +51,11 @@ public final class DashboardApp extends Application {
     connection.getStyleClass().add("connection");
     connection.setId("connection-status");
     reconnect.getStyleClass().add("primary-button");
-    reconnect.setOnAction(event -> connect());
+    reconnect.setOnAction(event -> {
+      DashboardFeed current = feed;
+      if (current != null)
+        current.retryNow();
+    });
     deviceScreen = devicesScreen();
     alertScreen = alertsScreen();
     content.setCenter(deviceScreen);
@@ -67,19 +69,7 @@ public final class DashboardApp extends Application {
     stage.setMinHeight(600);
     stage.setScene(scene);
     stage.show();
-    client.setConnectionListener(new ConnectionListener() {
-      @Override
-      public void onDisconnected(Throwable cause) {
-        Platform.runLater(() -> {
-          if (!closing) {
-            connection.setText(cause == null ? "Disconnected" : "Connection lost");
-            reconnect.setDisable(false);
-            reconnect.setText("Reconnect");
-          }
-        });
-      }
-    });
-    connect();
+    startFeed();
   }
 
   private Node sidebar() {
@@ -239,38 +229,45 @@ public final class DashboardApp extends Application {
     return column;
   }
 
-  private void connect() {
-    reconnect.setDisable(true);
-    connection.setText("Connecting…");
+  private void startFeed() {
     Map<String, String> args = getParameters().getNamed();
-    workers.submit(() -> {
-      try {
-        client.connect(new ConnectOptions(args.getOrDefault("host", "127.0.0.1"),
-            Integer.parseInt(args.getOrDefault("port", "1883")),
-            args.getOrDefault("client-id", "dashboard-" + UUID.randomUUID()),
-            args.getOrDefault("username", "viewer"),
-            System.getenv().getOrDefault("FROSTMQ_PASSWORD", "frostmq-demo").getBytes(StandardCharsets.UTF_8),
-            30, null, Tls.clientFromEnvironment()));
-        if (client.subscribe("coldchain/#", 1,
-            (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload))) == 128)
-          throw new MqttException("Viewer subscription denied");
-        Platform.runLater(() -> {
-          if (!closing) {
-            connection.setText("Live · MQTT connected");
-            reconnect.setText("Connected");
-          }
-        });
-      } catch (Exception e) {
-        client.disconnect();
-        Platform.runLater(() -> {
-          if (!closing) {
-            connection.setText("Cannot connect · check broker and credentials");
-            reconnect.setDisable(false);
-            reconnect.setText("Retry");
-          }
-        });
+    try {
+      var options = new ConnectOptions(args.getOrDefault("host", "127.0.0.1"),
+          Integer.parseInt(args.getOrDefault("port", "1883")),
+          args.getOrDefault("client-id", "dashboard-" + UUID.randomUUID()),
+          args.getOrDefault("username", "viewer"),
+          System.getenv().getOrDefault("FROSTMQ_PASSWORD", "frostmq-demo").getBytes(StandardCharsets.UTF_8),
+          30, null, Tls.clientFromEnvironment());
+      feed = new DashboardFeed(new BlockingMqttClient(), options,
+          (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload)),
+          state -> Platform.runLater(() -> showConnectionState(state)));
+      feed.start();
+    } catch (Exception e) {
+      connection.setText("Invalid connection settings");
+      reconnect.setDisable(true);
+    }
+  }
+
+  private void showConnectionState(DashboardFeed.State state) {
+    if (closing)
+      return;
+    switch (state.status()) {
+      case CONNECTING -> {
+        connection.setText("Connecting…");
+        reconnect.setDisable(true);
+        reconnect.setText("Connecting");
       }
-    });
+      case CONNECTED -> {
+        connection.setText("Live · MQTT connected");
+        reconnect.setDisable(true);
+        reconnect.setText("Connected");
+      }
+      case RETRYING -> {
+        connection.setText("Connection lost · retrying…");
+        reconnect.setDisable(false);
+        reconnect.setText("Retry now");
+      }
+    }
   }
 
   private void update(String topic, byte[] payload) {
@@ -286,8 +283,9 @@ public final class DashboardApp extends Application {
   @Override
   public void stop() {
     closing = true;
-    Thread.ofVirtual().start(client::disconnect);
-    workers.shutdownNow();
+    DashboardFeed current = feed;
+    if (current != null)
+      Thread.ofVirtual().start(current::close);
   }
 
   public static void main(String[] args) {
