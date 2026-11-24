@@ -3,6 +3,7 @@ package io.frostmq.client;
 import io.frostmq.broker.*;
 import io.frostmq.common.*;
 import org.junit.jupiter.api.*;
+import javax.net.ssl.SSLContext;
 import java.net.*;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
@@ -151,6 +152,24 @@ class BlockingMqttClientTest {
             long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
             assertTrue(elapsed >= 9500 && elapsed < 11500, "CONNACK timeout: " + elapsed);
             server.get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test void tlsHandshakeSharesTheOverallTenSecondConnectDeadline() throws Exception {
+        try (var fakeBroker = new ServerSocket(0); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> server = executor.submit(() -> {
+                try (var socket = fakeBroker.accept()) { Thread.sleep(20_000); }
+                return null;
+            });
+            var client = new BlockingMqttClient();
+            clients.add(client);
+            long start = System.nanoTime();
+            assertThrows(MqttException.class, () -> client.connect(new ConnectOptions(
+                    "127.0.0.1", fakeBroker.getLocalPort(), "tls-timeout", null, null,
+                    30, null, SSLContext.getDefault())));
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(elapsed >= 9_500 && elapsed < 11_000, "TLS CONNECT timeout: " + elapsed);
+            server.cancel(true);
         }
     }
 }

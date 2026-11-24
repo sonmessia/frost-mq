@@ -251,11 +251,25 @@ class BrokerProtocolTest {
         for (int i = 0; i < 1000; i++) assertTrue(session.enqueue(publish(TELEMETRY, "x", 0, false, 0)));
         assertFalse(session.enqueue(publish(TELEMETRY, "x", 0, false, 0)));
         assertEquals(1, session.droppedCount());
-        assertEquals(1, broker.droppedCount());
+        assertEquals(1, broker.outboundDropCount());
+        assertEquals(0, broker.rejectedConnectionCount());
         assertFalse(session.isClosed());
         assertFalse(session.enqueue(publish(TELEMETRY, "x", 1, false, 1)));
         assertTrue(session.isClosed());
         session.closeSession("again");
+        assertEquals(0, session.queuedCount());
+    }
+
+    @Test void inFlightQos1LimitClosesSlowSubscriber() {
+        var session = new ClientSession(broker, new Socket());
+        PublishPacket source = publish(TELEMETRY, "x", 1, false, 1);
+        for (int i = 0; i < ClientSession.QUEUE_CAPACITY; i++) session.deliver(source, 1, false);
+        assertEquals(ClientSession.QUEUE_CAPACITY, session.inFlightCount());
+        assertFalse(session.isClosed());
+
+        session.deliver(source, 1, false);
+        assertTrue(session.isClosed());
+        assertEquals(0, session.inFlightCount());
         assertEquals(0, session.queuedCount());
     }
 

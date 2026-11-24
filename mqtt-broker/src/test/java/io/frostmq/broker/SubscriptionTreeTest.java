@@ -35,21 +35,31 @@ class SubscriptionTreeTest {
         }
     }
 
-    @Test void quotasRejectWithoutCreatingBranchesAndDuplicatesUpdateQos() throws Exception {
+    @Test void quotasRejectWithoutCreatingBranchesAndDuplicateFilterReplacesQos() throws Exception {
         var tree = new SubscriptionTree(1, 2);
         ClientSession one = session(), two = session(), three = session();
         assertTrue(tree.subscribe(one, "a/b", 0));
         assertTrue(tree.subscribe(one, "a/b", 1));
+        assertEquals(1, tree.match("a/b").get(one));
+        assertTrue(tree.subscribe(one, "a/b", 0));
         assertFalse(tree.subscribe(one, "a/c", 1));
         assertEquals(1, tree.filterCount());
         assertEquals(1, tree.subscriptionCount());
-        assertEquals(1, tree.match("a/b").get(one));
+        assertEquals(0, tree.match("a/b").get(one));
 
         assertTrue(tree.subscribe(two, "a/#", 0));
         assertFalse(tree.subscribe(three, "a/+", 1));
         assertEquals(2, tree.filterCount());
         assertEquals(2, tree.subscriptionCount());
         assertFalse(tree.match("a/c").containsKey(three));
+    }
+
+    @Test void distinctOverlappingFiltersStillCoalesceToHighestQos() throws Exception {
+        var tree = new SubscriptionTree();
+        ClientSession session = session();
+        assertTrue(tree.subscribe(session, "a/#", 1));
+        assertTrue(tree.subscribe(session, "a/+", 0));
+        assertEquals(1, tree.match("a/b").get(session));
     }
 
     @Test void unsubscribeAndSessionRemovalPruneEmptyPaths() throws Exception {

@@ -15,27 +15,34 @@ import java.util.*;
 
 public final class AuthService {
     public static final int ITERATIONS = 210_000;
-    public record Principal(String username, String role) {}
-    private record Account(String role, byte[] salt, byte[] hash) {}
+    public enum ClientIdPolicy { USERNAME_ONLY, USERNAME_OR_UNRESERVED }
+    public record Role(String name, ClientIdPolicy clientIdPolicy) {
+        public Role { Objects.requireNonNull(name); Objects.requireNonNull(clientIdPolicy); }
+    }
+    public record Principal(String username, Role role) {}
+    private record Account(Role role, byte[] salt, byte[] hash) {}
     private record Permissions(List<String> publish, List<String> subscribe) {}
     private final Map<String, Account> accounts;
-    private final Map<String, Permissions> acl;
+    private final Map<Role, Permissions> acl;
     private final Account dummy;
 
     public AuthService(Path usersPath, Path aclPath) throws IOException {
         Map<String, Object> policies = object(load(aclPath));
-        var permissions = new HashMap<String, Permissions>();
+        var roles = new HashMap<String, Role>();
+        var permissions = new HashMap<Role, Permissions>();
         for (var entry : policies.entrySet()) {
             var policy = object(entry.getValue());
-            permissions.put(entry.getKey(), new Permissions(filters(policy.get("publish")), filters(policy.get("subscribe"))));
+            Role role = configuredRole(entry.getKey());
+            roles.put(entry.getKey(), role);
+            permissions.put(role, new Permissions(filters(policy.get("publish")), filters(policy.get("subscribe"))));
         }
         var loaded = new HashMap<String, Account>();
         for (var entry : object(object(load(usersPath)).get("users")).entrySet()) {
             String username = entry.getKey();
             if (!TopicMatcher.validTopic(username) || username.contains("/")) throw new IOException("Invalid account username");
             var user = object(entry.getValue());
-            String role = string(user.get("role"));
-            if (!permissions.containsKey(role)) throw new IOException("Account references unknown ACL role");
+            Role role = roles.get(string(user.get("role")));
+            if (role == null) throw new IOException("Account references unknown ACL role");
             if (!(user.get("iterations") instanceof BigDecimal n) || n.compareTo(BigDecimal.valueOf(ITERATIONS)) != 0)
                 throw new IOException("PBKDF2 iterations must be " + ITERATIONS);
             try {
@@ -48,7 +55,7 @@ public final class AuthService {
         if (loaded.isEmpty()) throw new IOException("No configured users");
         accounts = Map.copyOf(loaded);
         acl = Map.copyOf(permissions);
-        dummy = new Account("", new byte[16], new byte[32]);
+        dummy = new Account(configuredRole(""), new byte[16], new byte[32]);
     }
 
     public Optional<Principal> authenticate(String username, byte[] password) {
@@ -77,8 +84,10 @@ public final class AuthService {
      * offline, and prevents a viewer or engine from squatting on a device ID between reconnects.
      */
     public boolean canUseClientId(Principal principal, String clientId) {
-        if (principal.role().equals("device")) return clientId.equals(principal.username());
-        return clientId.equals(principal.username()) || !accounts.containsKey(clientId);
+        return switch (principal.role().clientIdPolicy()) {
+            case USERNAME_ONLY -> clientId.equals(principal.username());
+            case USERNAME_OR_UNRESERVED -> clientId.equals(principal.username()) || !accounts.containsKey(clientId);
+        };
     }
 
     public boolean canPublish(Principal principal, String topic) {
@@ -100,6 +109,11 @@ public final class AuthService {
     }
 
     private static String expand(String filter, Principal principal) { return filter.replace("${username}", principal.username()); }
+    private static Role configuredRole(String name) {
+        ClientIdPolicy policy = name.equals("device") ? ClientIdPolicy.USERNAME_ONLY
+                : ClientIdPolicy.USERNAME_OR_UNRESERVED;
+        return new Role(name, policy);
+    }
     private static Object load(Path path) throws IOException {
         if (Files.size(path) > 1_048_576) throw new IOException("Configuration exceeds 1 MB");
         return ConfigJson.parse(Files.readString(path));

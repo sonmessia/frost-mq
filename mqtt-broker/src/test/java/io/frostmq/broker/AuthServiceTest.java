@@ -12,13 +12,15 @@ class AuthServiceTest {
     @Test void validatesIndependentSampleHashesAndRoles() throws Exception {
         var auth = new AuthService(Path.of("../users.json"), Path.of("../acl.json"));
         var device = auth.authenticate("sensor01", "frostmq-demo".getBytes(StandardCharsets.UTF_8)).orElseThrow();
-        assertEquals("device", device.role());
+        assertEquals("device", device.role().name());
+        assertEquals(AuthService.ClientIdPolicy.USERNAME_ONLY, device.role().clientIdPolicy());
         assertTrue(auth.canPublish(device, "coldchain/site/sensor01/telemetry"));
         assertFalse(auth.canPublish(device, "coldchain/site/sensor02/telemetry"));
         assertTrue(auth.canSubscribe(device, "coldchain/+/sensor01/cmd"));
         assertFalse(auth.canSubscribe(device, "coldchain/+/+/cmd"));
         assertFalse(auth.canSubscribe(device, "coldchain/#"));
         var viewer = auth.authenticate("viewer", "frostmq-demo".getBytes(StandardCharsets.UTF_8)).orElseThrow();
+        assertEquals(AuthService.ClientIdPolicy.USERNAME_OR_UNRESERVED, viewer.role().clientIdPolicy());
         assertTrue(auth.canUseClientId(device, "sensor01"));
         assertFalse(auth.canUseClientId(device, "sensor02"));
         assertTrue(auth.canUseClientId(viewer, "viewer"));

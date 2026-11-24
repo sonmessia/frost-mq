@@ -24,7 +24,8 @@ public final class BrokerServer implements AutoCloseable {
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledExecutorService maintenance = Executors.newSingleThreadScheduledExecutor(
             task -> Thread.ofPlatform().daemon().name("frostmq-maintenance").unstarted(task));
-    private final LongAdder dropped = new LongAdder();
+    private final LongAdder outboundDrops = new LongAdder();
+    private final LongAdder rejectedConnections = new LongAdder();
     private final CountDownLatch closeComplete = new CountDownLatch(1);
     private volatile ServerSocket serverSocket;
     private volatile Thread acceptor;
@@ -76,7 +77,7 @@ public final class BrokerServer implements AutoCloseable {
                 Socket socket = serverSocket.accept();
                 if (connections.size() >= limits.maxConnections()) {
                     socket.close();
-                    dropped.increment();
+                    rejectedConnections.increment();
                     LOG.log(System.Logger.Level.WARNING, "Connection limit reached; socket rejected");
                     continue;
                 }
@@ -132,8 +133,9 @@ public final class BrokerServer implements AutoCloseable {
     public int port() { return serverSocket == null ? requestedPort : serverSocket.getLocalPort(); }
     public int sessionCount() { return sessions.size(); }
     public int connectionCount() { return connections.size(); }
-    public long droppedCount() { return dropped.sum(); }
-    void recordDrop() { dropped.increment(); }
+    public long outboundDropCount() { return outboundDrops.sum(); }
+    public long rejectedConnectionCount() { return rejectedConnections.sum(); }
+    void recordOutboundDrop() { outboundDrops.increment(); }
 
     @Override public void close() {
         boolean initiate;

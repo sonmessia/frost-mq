@@ -69,6 +69,36 @@ class ColdChainIntegrationTest {
         }
     }
 
+    @Test @Timeout(30) void engineRecoversWhenBrokerIsUnavailableAtStartup() throws Exception {
+        var auth = new AuthService(Path.of("../users.json"), Path.of("../acl.json"));
+        int port;
+        try (var seed = new BrokerServer(0, auth)) {
+            seed.start();
+            port = seed.port();
+        }
+        Path csvPath = temporary.resolve("initial-reconnect.csv");
+        try (var engine = new RuleEngine("127.0.0.1", port, "frostmq-demo", csvPath);
+             var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> starting = executor.submit(() -> { engine.start(); return null; });
+            Thread.sleep(500);
+            try (var broker = new BrokerServer(port, auth); var device = new BlockingMqttClient()) {
+                broker.start();
+                starting.get(10, TimeUnit.SECONDS);
+                device.connect(new ConnectOptions("127.0.0.1", port, "sensor01", "sensor01", "frostmq-demo"));
+                device.publish("coldchain/site/sensor01/telemetry",
+                        "{\"temp\":9.0}".getBytes(StandardCharsets.UTF_8), 1, false);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                String csv = "";
+                while (System.nanoTime() < deadline) {
+                    csv = Files.readString(csvPath);
+                    if (csv.contains("temp-high")) break;
+                    Thread.sleep(25);
+                }
+                assertTrue(csv.contains("CRITICAL,\"temp-high\",\"site\",\"sensor01\""), csv);
+            }
+        }
+    }
+
     @Test @Timeout(30) void simulatorReconnectsAndRestoresTelemetryStatusAndCommands() throws Exception {
         var auth = new AuthService(Path.of("../users.json"), Path.of("../acl.json"));
         try (var first = new BrokerServer(0, auth)) {
@@ -132,6 +162,31 @@ class ColdChainIntegrationTest {
                 }
                 assertTrue(csv.contains("\"'=1\""), csv);
                 assertFalse(csv.contains("\"=1\""), csv);
+            }
+        }
+    }
+
+    @Test @Timeout(20) void negativeTelemetryValueIsNeutralizedInCsv() throws Exception {
+        try (var broker = new BrokerServer(0, new AuthService(Path.of("../users.json"), Path.of("../acl.json")))) {
+            broker.start();
+            Path csvPath = temporary.resolve("negative-value.csv");
+            try (var engine = new RuleEngine("127.0.0.1", broker.port(), "frostmq-demo", csvPath);
+                 var device = new BlockingMqttClient()) {
+                engine.start();
+                device.connect(new ConnectOptions("127.0.0.1", broker.port(), "sensor01", "sensor01", "frostmq-demo"));
+                device.publish("coldchain/site/sensor01/telemetry",
+                        "{\"temp\":9.0}".getBytes(StandardCharsets.UTF_8), 1, false);
+                device.publish("coldchain/site/sensor01/telemetry",
+                        "{\"temp\":-1.0}".getBytes(StandardCharsets.UTF_8), 1, false);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                String csv = "";
+                while (System.nanoTime() < deadline) {
+                    csv = Files.readString(csvPath);
+                    if (csv.contains("RESOLVED")) break;
+                    Thread.sleep(25);
+                }
+                assertTrue(csv.contains("RESOLVED,\"temp-high\",\"site\",\"sensor01\",\"'-1.0\""), csv);
+                assertFalse(csv.contains(",\"sensor01\",-1.0"), csv);
             }
         }
     }

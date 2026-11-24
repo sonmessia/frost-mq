@@ -31,7 +31,7 @@ public final class DashboardApp extends Application {
   private final Button reconnect = new Button("Connect");
   private final BorderPane content = new BorderPane();
   private volatile boolean closing;
-  private volatile DashboardFeed feed;
+  private volatile ReconnectingMqttSession feed;
   private Node deviceScreen;
   private Node alertScreen;
 
@@ -52,7 +52,7 @@ public final class DashboardApp extends Application {
     connection.setId("connection-status");
     reconnect.getStyleClass().add("primary-button");
     reconnect.setOnAction(event -> {
-      DashboardFeed current = feed;
+      ReconnectingMqttSession current = feed;
       if (current != null)
         current.retryNow();
     });
@@ -238,8 +238,12 @@ public final class DashboardApp extends Application {
           args.getOrDefault("username", "viewer"),
           System.getenv().getOrDefault("FROSTMQ_PASSWORD", "frostmq-demo").getBytes(StandardCharsets.UTF_8),
           30, null, Tls.clientFromEnvironment());
-      feed = new DashboardFeed(new BlockingMqttClient(), options,
-          (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload)),
+      feed = new ReconnectingMqttSession(new BlockingMqttClient(), options,
+          mqtt -> {
+            if (mqtt.subscribe("coldchain/#", 1,
+                    (topic, payload, qos, retained) -> Platform.runLater(() -> update(topic, payload))) == 128)
+              throw new MqttException("Viewer subscription denied");
+          },
           state -> Platform.runLater(() -> showConnectionState(state)));
       feed.start();
     } catch (Exception e) {
@@ -248,7 +252,7 @@ public final class DashboardApp extends Application {
     }
   }
 
-  private void showConnectionState(DashboardFeed.State state) {
+  private void showConnectionState(ReconnectingMqttSession.State state) {
     if (closing)
       return;
     switch (state.status()) {
@@ -283,7 +287,7 @@ public final class DashboardApp extends Application {
   @Override
   public void stop() {
     closing = true;
-    DashboardFeed current = feed;
+    ReconnectingMqttSession current = feed;
     if (current != null)
       Thread.ofVirtual().start(current::close);
   }

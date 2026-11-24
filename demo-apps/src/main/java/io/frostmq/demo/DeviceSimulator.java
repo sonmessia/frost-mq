@@ -13,8 +13,6 @@ import java.util.concurrent.atomic.*;
 public final class DeviceSimulator implements AutoCloseable {
     private static final Gson GSON = new Gson();
     private static final System.Logger LOG = System.getLogger(DeviceSimulator.class.getName());
-    private static final long INITIAL_RECONNECT_DELAY_MS = 250;
-    private static final long MAX_RECONNECT_DELAY_MS = 10_000;
     private static final class Node {
         final String id;
         final boolean actuator;
@@ -22,6 +20,7 @@ public final class DeviceSimulator implements AutoCloseable {
         final AtomicBoolean cooling = new AtomicBoolean();
         final AtomicBoolean fault = new AtomicBoolean();
         final CompletableFuture<Void> ready = new CompletableFuture<>();
+        volatile ReconnectingMqttSession session;
         double temperature = 4.0;
         Node(String id, boolean actuator) { this.id = id; this.actuator = actuator; }
     }
@@ -51,6 +50,9 @@ public final class DeviceSimulator implements AutoCloseable {
         try {
             CompletableFuture.allOf(nodes.values().stream().map(node -> node.ready).toArray(CompletableFuture[]::new))
                     .get(12, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            LOG.log(System.Logger.Level.WARNING,
+                    "Simulator started before every node connected; reconnecting in background");
         } catch (Exception e) { close(); throw e; }
     }
 
@@ -67,50 +69,47 @@ public final class DeviceSimulator implements AutoCloseable {
         var will = new PublishPacket(base + "/status", bytes("offline"), 1, true, false, 0);
         var options = new ConnectOptions(settings.host(), settings.port(), node.id, node.id,
                 bytes(settings.password()), 30, will, tls);
-        long reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+        node.session = new ReconnectingMqttSession(node.client, options,
+                mqtt -> restoreNode(node, base, mqtt), state -> {
+                    switch (state.status()) {
+                        case CONNECTED -> LOG.log(System.Logger.Level.INFO,
+                                "Simulated node " + node.id + " connected");
+                        case RETRYING -> {
+                            if (running.get()) LOG.log(System.Logger.Level.WARNING,
+                                    "Simulated node " + node.id + " disconnected; reconnecting", state.cause());
+                        }
+                        case CONNECTING -> { }
+                    }
+                });
+        node.session.start().whenComplete((ignored, error) -> {
+            if (error == null) node.ready.complete(null);
+            else node.ready.completeExceptionally(error);
+        });
         try {
+            if (!node.session.awaitConnected()) return;
             while (running.get() && !Thread.currentThread().isInterrupted()) {
                 try {
-                    connect(node, base, options);
-                    node.ready.complete(null);
-                    reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
-                    while (running.get() && !Thread.currentThread().isInterrupted()) {
-                        publishTelemetry(node, base);
-                        Thread.sleep(2000);
-                    }
+                    publishTelemetry(node, base);
+                    Thread.sleep(2000);
                 } catch (MqttException e) {
-                    node.client.disconnect();
-                    if (!running.get()) break;
-                    LOG.log(System.Logger.Level.WARNING,
-                            "Simulated node " + node.id + " disconnected; reconnecting", e);
-                    Thread.sleep(reconnectDelay);
-                    reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
+                    if (!node.session.awaitConnected()) return;
                 }
             }
         } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         finally {
             if (!node.ready.isDone())
                 node.ready.completeExceptionally(new CancellationException("Simulator stopped before node connected"));
-            if (!Thread.currentThread().isInterrupted()) {
-                try { node.client.publish(base + "/status", bytes("offline"), 1, true); }
-                catch (MqttException ignored) {}
-            }
-            node.client.disconnect();
+            node.session.close();
         }
     }
 
-    private void connect(Node node, String base, ConnectOptions options) throws MqttException {
-        node.client.connect(options);
+    private void restoreNode(Node node, String base, MqttClient mqtt) throws MqttException {
         if (node.actuator) {
-            int grant = node.client.subscribe("coldchain/+/" + node.id + "/cmd", 1,
+            int grant = mqtt.subscribe("coldchain/+/" + node.id + "/cmd", 1,
                     (topic, payload, qos, retained) -> applyCommand(node, payload));
-            if (grant == 128) {
-                node.client.disconnect();
-                throw new MqttException("Actuator subscription denied");
-            }
+            if (grant == 128) throw new MqttException("Actuator subscription denied");
         }
-        node.client.publish(base + "/status", bytes("online"), 1, true);
-        LOG.log(System.Logger.Level.INFO, "Simulated node " + node.id + " connected");
+        mqtt.publish(base + "/status", bytes("online"), 1, true);
     }
 
     private static void applyCommand(Node node, byte[] payload) {
@@ -138,15 +137,17 @@ public final class DeviceSimulator implements AutoCloseable {
 
     @Override public synchronized void close() {
         running.set(false);
-        workers.shutdown();
+        nodes.values().forEach(node -> {
+            try {
+                node.client.publish("coldchain/" + settings.site() + "/" + node.id + "/status",
+                        bytes("offline"), 0, true);
+            } catch (MqttException ignored) {}
+        });
+        nodes.values().forEach(node -> { if (node.session != null) node.session.close(); });
+        workers.shutdownNow();
         try {
-            if (!workers.awaitTermination(4, TimeUnit.SECONDS)) {
-                workers.shutdownNow();
-                nodes.values().forEach(node -> node.client.disconnect());
-            }
+            workers.awaitTermination(4, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            workers.shutdownNow();
-            nodes.values().forEach(node -> node.client.disconnect());
             Thread.currentThread().interrupt();
         }
     }
@@ -162,7 +163,7 @@ public final class DeviceSimulator implements AutoCloseable {
                 settings.number("nodes", 5), settings.password())) {
             Runtime.getRuntime().addShutdownHook(new Thread(simulator::close));
             simulator.start();
-            System.out.println("Sensors online. sensor01 and sensor02 include cooling actuators.");
+            System.out.println("Sensor simulator started. sensor01 and sensor02 include cooling actuators.");
             String fault = settings.text("fault", "");
             boolean injected = fault.isEmpty();
             long start = System.nanoTime();

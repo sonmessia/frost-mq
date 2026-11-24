@@ -4,6 +4,8 @@ import io.frostmq.common.*;
 import javax.net.ssl.*;
 import java.io.IOException;
 import java.net.*;
+import java.security.cert.*;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
@@ -49,6 +51,7 @@ public final class BlockingMqttClient implements MqttClient {
         lifecycle.lock();
         try {
             if (connection != null && !connection.closed.get()) throw new MqttException("Already connected");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             Socket socket;
             try {
                 socket = options.sslContext() == null ? new Socket()
@@ -59,23 +62,27 @@ public final class BlockingMqttClient implements MqttClient {
             Connection c = new Connection(options.keepAliveSeconds(), socket);
             connection = c;
             try {
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                c.socket.connect(new InetSocketAddress(options.host(), options.port()), 10_000);
+                c.socket.connect(new InetSocketAddress(options.host(), options.port()), remainingMillis(deadline));
                 c.socket.setTcpNoDelay(true);
                 if (c.socket instanceof SSLSocket tlsSocket) {
-                    c.socket.setSoTimeout(10_000);
                     SSLParameters parameters = tlsSocket.getSSLParameters();
                     parameters.setEndpointIdentificationAlgorithm("HTTPS");
                     tlsSocket.setSSLParameters(parameters);
-                    tlsSocket.startHandshake();
+                    c.socket.setSoTimeout(remainingMillis(deadline));
+                    Future<?> handshake = c.workers.submit(() -> {
+                        tlsSocket.startHandshake();
+                        return null;
+                    });
+                    try { handshake.get(remainingNanos(deadline), TimeUnit.NANOSECONDS); }
+                    finally { if (!handshake.isDone()) handshake.cancel(true); }
                     c.socket.setSoTimeout(0);
+                    requireSubjectAlternativeName(tlsSocket, options.host());
+                    remainingNanos(deadline);
                 }
                 c.workers.submit(() -> readLoop(c));
                 send(c, new ConnectPacket("MQTT", 4, options.clientId(), true, options.keepAliveSeconds(),
                         options.username(), options.password(), options.willMessage()));
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) throw new TimeoutException("CONNECT timeout");
-                ConnackPacket ack = c.connack.get(remaining, TimeUnit.NANOSECONDS);
+                ConnackPacket ack = c.connack.get(remainingNanos(deadline), TimeUnit.NANOSECONDS);
                 if (ack.returnCode() != 0 || ack.sessionPresent()) throw new MqttException("CONNECT rejected, code " + ack.returnCode());
                 if (c.closed.get()) throw new MqttException("Connection closed during CONNECT");
                 if (c.keepAlive > 0) c.workers.submit(() -> heartbeat(c));
@@ -88,6 +95,41 @@ public final class BlockingMqttClient implements MqttClient {
                 throw new MqttException("CONNECT failed", e);
             }
         } finally { lifecycle.unlock(); }
+    }
+
+    private static long remainingNanos(long deadline) throws TimeoutException {
+        long remaining = deadline - System.nanoTime();
+        if (remaining <= 0) throw new TimeoutException("CONNECT timeout");
+        return remaining;
+    }
+
+    private static int remainingMillis(long deadline) throws TimeoutException {
+        long millis = TimeUnit.NANOSECONDS.toMillis(remainingNanos(deadline));
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1, millis));
+    }
+
+    /** Endpoint identification verifies the match; this additionally forbids legacy CN fallback. */
+    private static void requireSubjectAlternativeName(SSLSocket socket, String host) throws SSLHandshakeException {
+        try {
+            if (!(socket.getSession().getPeerCertificates()[0] instanceof X509Certificate certificate))
+                throw new SSLHandshakeException("Broker did not present an X.509 certificate");
+            Collection<List<?>> names = certificate.getSubjectAlternativeNames();
+            int requiredType = ipLiteral(host) ? 7 : 2;
+            boolean present = names != null && names.stream().anyMatch(name -> name.size() >= 2
+                    && name.getFirst() instanceof Integer type && type == requiredType);
+            if (!present) throw new SSLHandshakeException(requiredType == 7
+                    ? "Broker certificate lacks an IP address SAN"
+                    : "Broker certificate lacks a DNS SAN");
+        } catch (SSLPeerUnverifiedException | CertificateParsingException e) {
+            var failure = new SSLHandshakeException("Cannot verify broker certificate SAN");
+            failure.initCause(e);
+            throw failure;
+        }
+    }
+
+    private static boolean ipLiteral(String host) {
+        String value = host.startsWith("[") && host.endsWith("]") ? host.substring(1, host.length() - 1) : host;
+        return value.indexOf(':') >= 0 || value.matches("[0-9.]+");
     }
 
     @Override public void publish(String topic, byte[] payload, int qos, boolean retain) throws MqttException {

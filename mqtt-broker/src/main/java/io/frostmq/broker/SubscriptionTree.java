@@ -46,7 +46,9 @@ public final class SubscriptionTree {
             String[] levels = filter.split("/", -1);
             Node node = find(levels);
             if (node != null && node.subscribers.containsKey(session)) {
-                node.subscribers.merge(session, qos, Math::max);
+                // MQTT 3.1.1 replaces the granted QoS when the same filter is subscribed again.
+                // Math.max is only for distinct overlapping filters during match().
+                node.subscribers.put(session, qos);
                 return true;
             }
             Set<Node> owned = memberships.get(session);

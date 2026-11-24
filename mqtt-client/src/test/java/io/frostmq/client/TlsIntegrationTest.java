@@ -68,18 +68,29 @@ class TlsIntegrationTest {
         }
     }
 
+    @Test void commonNameWithoutSanIsRejected() throws Exception {
+        Material material = material("cn-only", "CN=localhost", null);
+        try (var broker = tlsBroker(Tls.server(material.keyStore(), "changeit".toCharArray()))) {
+            broker.start();
+            MqttException error = assertHandshakeRejected("localhost", broker.port(),
+                    Tls.client(material.trustStore(), "changeit".toCharArray()));
+            assertTrue(causeMessageContains(error, "lacks a DNS SAN"), error.toString());
+        }
+    }
+
     private BrokerServer tlsBroker(SSLContext context) throws Exception {
         return new BrokerServer(0,
                 new AuthService(Path.of("../users.json"), Path.of("../acl.json")), context);
     }
 
-    private static void assertHandshakeRejected(String host, int port, SSLContext context) {
+    private static MqttException assertHandshakeRejected(String host, int port, SSLContext context) {
         var client = new BlockingMqttClient();
         try {
             MqttException error = assertThrows(MqttException.class, () -> client.connect(new ConnectOptions(
                     host, port, "rejected-tls", "viewer", "frostmq-demo".getBytes(StandardCharsets.UTF_8),
                     30, null, context)));
             assertTrue(hasCause(error, SSLHandshakeException.class), error.toString());
+            return error;
         } finally {
             client.disconnect();
         }
@@ -89,10 +100,13 @@ class TlsIntegrationTest {
         Path keyStore = temporary.resolve(name + "-server.p12");
         Path certificate = temporary.resolve(name + "-server.crt");
         Path trustStore = temporary.resolve(name + "-trust.p12");
-        keytool("-genkeypair", "-alias", name, "-keyalg", "RSA", "-keysize", "2048",
-                "-validity", "1", "-storetype", "PKCS12", "-keystore", keyStore.toString(),
-                "-storepass", "changeit", "-keypass", "changeit", "-dname", distinguishedName,
-                "-ext", san, "-noprompt");
+        var generate = new ArrayList<>(List.of("-genkeypair", "-alias", name, "-keyalg", "RSA",
+                "-keysize", "2048", "-validity", "1", "-storetype", "PKCS12", "-keystore",
+                keyStore.toString(), "-storepass", "changeit", "-keypass", "changeit", "-dname",
+                distinguishedName));
+        if (san != null) generate.addAll(List.of("-ext", san));
+        generate.add("-noprompt");
+        keytool(generate.toArray(String[]::new));
         keytool("-exportcert", "-alias", name, "-keystore", keyStore.toString(),
                 "-storepass", "changeit", "-file", certificate.toString());
         keytool("-importcert", "-noprompt", "-alias", name, "-file", certificate.toString(),
@@ -103,6 +117,12 @@ class TlsIntegrationTest {
     private static boolean hasCause(Throwable error, Class<? extends Throwable> type) {
         for (Throwable current = error; current != null; current = current.getCause())
             if (type.isInstance(current)) return true;
+        return false;
+    }
+
+    private static boolean causeMessageContains(Throwable error, String text) {
+        for (Throwable current = error; current != null; current = current.getCause())
+            if (current.getMessage() != null && current.getMessage().contains(text)) return true;
         return false;
     }
 

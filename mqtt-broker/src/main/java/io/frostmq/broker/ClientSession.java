@@ -50,7 +50,7 @@ public final class ClientSession {
         if (outboundQueue.offer(packet)) return true;
         if (packet instanceof PublishPacket publish && publish.qos() == 0) {
             dropped.increment();
-            broker.recordDrop();
+            broker.recordOutboundDrop();
         } else closeSession("Outbound queue full");
         return false;
     }

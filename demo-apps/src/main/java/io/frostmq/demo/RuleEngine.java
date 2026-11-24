@@ -9,24 +9,17 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
 public final class RuleEngine implements AutoCloseable {
     private record Event(String topic, byte[] payload, boolean retained) {}
     private static final System.Logger LOG = System.getLogger(RuleEngine.class.getName());
-    private static final long INITIAL_RECONNECT_DELAY_MS = 250;
-    private static final long MAX_RECONNECT_DELAY_MS = 10_000;
     private final MqttClient client;
-    private final ConnectOptions options;
+    private final ReconnectingMqttSession session;
     private final Path alertsPath;
     private final BlockingQueue<Event> events = new ArrayBlockingQueue<>(10_000);
     private final ColdChainRules rules = new ColdChainRules();
     private final AtomicBoolean running = new AtomicBoolean();
-    private final AtomicLong disconnectEpoch = new AtomicLong();
-    private final Object connectionSignal = new Object();
-    private volatile boolean connected;
     private volatile Thread worker;
-    private volatile Thread supervisor;
     private boolean started;
 
     public RuleEngine(String host, int port, String password, Path alertsPath) throws IOException {
@@ -36,8 +29,17 @@ public final class RuleEngine implements AutoCloseable {
 
     RuleEngine(MqttClient client, ConnectOptions options, Path alertsPath) {
         this.client = client;
-        this.options = options;
         this.alertsPath = alertsPath;
+        session = new ReconnectingMqttSession(client, options, this::restoreSession, state -> {
+            switch (state.status()) {
+                case CONNECTED -> LOG.log(System.Logger.Level.INFO, "Rule engine connected and subscribed");
+                case RETRYING -> {
+                    if (running.get()) LOG.log(System.Logger.Level.WARNING,
+                            "Rule engine disconnected; reconnecting", state.cause());
+                }
+                case CONNECTING -> { }
+            }
+        });
     }
 
     public synchronized void start() throws Exception {
@@ -48,75 +50,22 @@ public final class RuleEngine implements AutoCloseable {
         if (needsHeader) { csv.write("ts,severity,rule,site,device,value\n"); csv.flush(); }
         running.set(true);
         worker = Thread.ofVirtual().name("frostmq-rule-worker").start(() -> process(csv));
-        client.setConnectionListener(new ConnectionListener() {
-            @Override public void onDisconnected(Throwable cause) {
-                boolean wasConnected = connected;
-                disconnectEpoch.incrementAndGet();
-                connected = false;
-                synchronized (connectionSignal) { connectionSignal.notifyAll(); }
-                if (running.get() && wasConnected)
-                    LOG.log(System.Logger.Level.WARNING, "Rule engine disconnected; reconnecting", cause);
-            }
-        });
         try {
-            connectAndSubscribe();
+            session.start().toCompletableFuture().get(12, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            LOG.log(System.Logger.Level.WARNING,
+                    "Rule engine started without a broker connection; reconnecting in background");
         } catch (Exception e) { close(); throw e; }
-        supervisor = Thread.ofVirtual().name("frostmq-rule-supervisor").start(this::supervise);
     }
 
-    private void supervise() {
-        long delay = INITIAL_RECONNECT_DELAY_MS;
-        while (running.get()) {
-            synchronized (connectionSignal) {
-                while (running.get() && connected) {
-                    try { connectionSignal.wait(); }
-                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                }
-            }
-            if (!running.get()) return;
-            try { Thread.sleep(delay); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-            if (!running.get()) return;
-            try {
-                LOG.log(System.Logger.Level.INFO, "Rule engine reconnecting");
-                // Discard any half-established connection before replaying the session.
-                client.disconnect();
-                connectAndSubscribe();
-                delay = INITIAL_RECONNECT_DELAY_MS;
-            } catch (MqttException e) {
-                if (running.get())
-                    LOG.log(System.Logger.Level.WARNING, "Rule engine reconnect failed; retrying", e);
-                delay = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
-            }
-        }
-    }
-
-    private void connectAndSubscribe() throws MqttException {
-        if (!running.get()) throw new MqttException("Rule engine is stopping");
-        long epoch = disconnectEpoch.get();
-        client.connect(options);
-        if (!running.get()) {
-            client.disconnect();
-            throw new MqttException("Rule engine is stopping");
-        }
+    private void restoreSession(MqttClient mqtt) throws MqttException {
         MessageListener listener = (topic, payload, qos, retained) -> {
             if (!retained && !events.offer(new Event(topic, payload, false)))
                 LOG.log(System.Logger.Level.ERROR, "Rule engine event queue full; message dropped");
         };
-        if (client.subscribe("coldchain/+/+/telemetry", 1, listener) == 128 ||
-                client.subscribe("coldchain/+/+/status", 1, listener) == 128) {
-            client.disconnect();
+        if (mqtt.subscribe("coldchain/+/+/telemetry", 1, listener) == 128 ||
+                mqtt.subscribe("coldchain/+/+/status", 1, listener) == 128)
             throw new MqttException("Rule engine subscriptions denied");
-        }
-        synchronized (connectionSignal) {
-            connected = disconnectEpoch.get() == epoch;
-            connectionSignal.notifyAll();
-        }
-        if (!connected) {
-            client.disconnect();
-            throw new MqttException("Connection lost while replaying subscriptions");
-        }
-        LOG.log(System.Logger.Level.INFO, "Rule engine connected and subscribed");
     }
 
     private void process(BufferedWriter csv) {
@@ -130,7 +79,7 @@ public final class RuleEngine implements AutoCloseable {
                         String severity = emission.topic().substring(emission.topic().lastIndexOf('/') + 1);
                         csv.write(alert.ts() + "," + severity + "," + CsvFormat.cell(alert.rule()) + ","
                                 + CsvFormat.cell(alert.site()) + "," + CsvFormat.cell(alert.device()) + ","
-                                + (alert.value() == null ? "" : alert.value()) + "\n");
+                                + (alert.value() == null ? "" : CsvFormat.cell(Double.toString(alert.value()))) + "\n");
                         csv.flush();
                     }
                 }
@@ -144,7 +93,6 @@ public final class RuleEngine implements AutoCloseable {
 
     /** Retries transient publish failures while the connection supervisor restores the session. */
     private void publishWithRetry(String topic, byte[] payload) throws InterruptedException {
-        long delay = INITIAL_RECONNECT_DELAY_MS;
         while (running.get()) {
             try {
                 client.publish(topic, payload, 1, false);
@@ -152,22 +100,17 @@ public final class RuleEngine implements AutoCloseable {
             } catch (MqttException e) {
                 if (!running.get()) return;
                 LOG.log(System.Logger.Level.WARNING, "Rule engine publish failed; will retry", e);
-                Thread.sleep(delay);
-                delay = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
+                if (!session.awaitConnected()) return;
             }
         }
     }
 
     @Override public synchronized void close() {
         running.set(false);
-        synchronized (connectionSignal) { connectionSignal.notifyAll(); }
-        client.disconnect();
+        session.close();
         Thread currentWorker = worker;
-        Thread currentSupervisor = supervisor;
         if (currentWorker != null) currentWorker.interrupt();
-        if (currentSupervisor != null) currentSupervisor.interrupt();
         join(currentWorker);
-        join(currentSupervisor);
     }
 
     private void join(Thread thread) {

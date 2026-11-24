@@ -25,6 +25,8 @@ class BrokerLimitsTest {
         assertThrows(MqttException.class, () -> second.connect(
                 new ConnectOptions("127.0.0.1", broker.port(), "two", "viewer", "frostmq-demo")));
         assertEquals(1, broker.connectionCount());
+        assertEquals(1, broker.rejectedConnectionCount());
+        assertEquals(0, broker.outboundDropCount());
         assertEquals(1, first.subscribe("coldchain/#", 1, (topic, payload, qos, retained) -> {}));
     }
 
